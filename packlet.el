@@ -37,7 +37,29 @@
 When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
   (when (and (symbolp function)
              (not (fboundp function)))
-    (autoload function file nil interactive)))
+    (packlet--maybe-load-autoloads file)
+    (unless (fboundp function)
+      (autoload function file nil interactive))))
+
+(defvar packlet--autoloads-attempted (make-hash-table :test #'equal)
+  "Autoload libraries that `packlet' has already tried to load.")
+
+(defun packlet--autoloads-file (file)
+  "Return the autoload library name for FILE."
+  (format "%s-autoloads" file))
+
+(defun packlet--maybe-load-autoloads (file)
+  "Load FILE's autoload definitions once when available."
+  (let ((autoloads-file (packlet--autoloads-file file)))
+    (unless (gethash autoloads-file packlet--autoloads-attempted)
+      (puthash autoloads-file t packlet--autoloads-attempted)
+      (load autoloads-file t t))))
+
+(defun packlet--load-feature (feature &optional file)
+  "Load FEATURE, falling back to FILE when needed."
+  (or (require feature nil t)
+      (when file
+        (load file nil t))))
 
 (defun packlet--register-after-load (feature function afters)
   "Run FUNCTION after FEATURE and AFTERS are loaded."
@@ -48,21 +70,89 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
       (funcall function)))
   (funcall function))
 
-(defun packlet--register-demand-load (feature afters)
-  "Require FEATURE once AFTERS are loaded."
+(defun packlet--register-demand-load (feature afters &optional file)
+  "Load FEATURE once AFTERS are loaded.
+When FILE is non-nil, use it as a fallback library name."
   (let ((load-now
          (lambda ()
            (when (and (not (featurep feature))
                       (packlet--all-features-loaded-p afters))
-             (require feature nil t)))))
+             (packlet--load-feature feature file)))))
     (dolist (after afters)
       (with-eval-after-load after
         (funcall load-now)))
     (funcall load-now)))
 
+(defun packlet--idle-load-ready-p ()
+  "Return non-nil when an idle load should proceed."
+  (and (not (input-pending-p))
+       (not (active-minibuffer-window))
+       (not executing-kbd-macro)))
+
+(defun packlet--register-idle-load (feature afters &optional file delay)
+  "Load FEATURE after startup during idle time.
+AFTERS must be loaded before scheduling begins.  When FILE is non-nil,
+use it as a fallback library name.  DELAY is the idle duration in seconds."
+  (let ((delay (or delay 1.0))
+        (startup-complete after-init-time)
+        timer
+        startup-hook-fn
+        maybe-schedule)
+    (setq maybe-schedule
+          (lambda ()
+            (when (and startup-complete
+                       (not (featurep feature))
+                       (packlet--all-features-loaded-p afters)
+                       (not (timerp timer)))
+              (setq timer
+                    (run-with-idle-timer
+                     delay nil
+                     (lambda ()
+                       (setq timer nil)
+                       (when (and startup-complete
+                                  (not (featurep feature))
+                                  (packlet--all-features-loaded-p afters))
+                         (if (packlet--idle-load-ready-p)
+                             (packlet--load-feature feature file)
+                           (funcall maybe-schedule)))))))))
+    (unless startup-complete
+      (setq startup-hook-fn
+            (lambda ()
+              (setq startup-complete t)
+              (remove-hook 'emacs-startup-hook startup-hook-fn)
+              (funcall maybe-schedule)))
+      (add-hook 'emacs-startup-hook startup-hook-fn))
+    (dolist (after afters)
+      (with-eval-after-load after
+        (funcall maybe-schedule)))
+    (funcall maybe-schedule)))
+
+(defun packlet--resolve-keymap (keymap)
+  "Return the keymap named by KEYMAP, or nil when it is not yet bound."
+  (when (boundp keymap)
+    (let ((value (symbol-value keymap)))
+      (unless (keymapp value)
+        (error "packlet: %S does not name a keymap" keymap))
+      value)))
+
+(defun packlet--register-keymap-binding (feature keymap key command afters)
+  "Bind KEY to COMMAND in KEYMAP when the map becomes available.
+FEATURE and AFTERS are watched for opportunities to install the binding."
+  (let ((install
+         (lambda ()
+           (when-let ((map (packlet--resolve-keymap keymap)))
+             (define-key map key command)))))
+    (with-eval-after-load feature
+      (funcall install))
+    (dolist (after afters)
+      (with-eval-after-load after
+        (funcall install)))
+    (funcall install)))
+
 (eval-and-compile
   (defconst packlet--keywords
-    '(:init :config :commands :mode :hook :bind :after :demand))
+    '(:file :init :custom :config :commands :autoload :mode :hook :bind
+            :after :idle :demand :functions :defines))
 
   (defun packlet--keyword-p (form)
     "Return non-nil when FORM is a supported `packlet' keyword."
@@ -115,6 +205,24 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
           (error "packlet: invalid value %S for %S" form keyword))))
       (nreverse result)))
 
+  (defun packlet--file-form (sections feature)
+    "Return the library name from SECTIONS for FEATURE."
+    (if-let ((entry (assq :file sections)))
+        (pcase (cdr entry)
+          ('()
+           (error "packlet: :file requires a symbol or string"))
+          (`(,form)
+           (cond
+            ((symbolp form)
+             (symbol-name form))
+            ((stringp form)
+             form)
+            (t
+             (error "packlet: :file must be a symbol or string, got %S" form))))
+          (_
+           (error "packlet: :file accepts at most one form")))
+      (symbol-name feature)))
+
   (defun packlet--mode-entry-p (value)
     "Return non-nil when VALUE is a valid `:mode' entry."
     (and (consp value)
@@ -137,6 +245,20 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
              (vectorp (car value)))
          (symbolp (cdr value))))
 
+  (defun packlet--bind-map-group-p (value)
+    "Return non-nil when VALUE is a valid keymap binding group."
+    (and (packlet--proper-list-p value)
+         (eq (car value) :map)
+         (symbolp (cadr value))
+         (cddr value)))
+
+  (defun packlet--custom-entry-p (value)
+    "Return non-nil when VALUE is a valid `:custom' entry."
+    (and (consp value)
+         (symbolp (car value))
+         (consp (cdr value))
+         (null (cddr value))))
+
   (defun packlet--normalize-pairs (forms keyword predicate)
     "Normalize FORMS under KEYWORD into a flat list of pairs using PREDICATE."
     (let (result)
@@ -153,6 +275,52 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
           (error "packlet: invalid value %S for %S" form keyword))))
       (nreverse result)))
 
+  (defun packlet--normalize-bindings (forms)
+    "Normalize FORMS under `:bind'."
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((packlet--bind-entry-p form)
+          (push (list :global (car form) (cdr form)) result))
+         ((packlet--bind-map-group-p form)
+          (let ((keymap (cadr form)))
+            (dolist (entry (cddr form))
+              (unless (packlet--bind-entry-p entry)
+                (error "packlet: invalid entry %S for :bind" entry))
+              (push (list :map keymap (car entry) (cdr entry)) result))))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (cond
+             ((packlet--bind-entry-p entry)
+              (push (list :global (car entry) (cdr entry)) result))
+             ((packlet--bind-map-group-p entry)
+              (let ((keymap (cadr entry)))
+                (dolist (binding (cddr entry))
+                  (unless (packlet--bind-entry-p binding)
+                    (error "packlet: invalid entry %S for :bind" binding))
+                  (push (list :map keymap (car binding) (cdr binding)) result))))
+             (t
+              (error "packlet: invalid entry %S for :bind" entry)))))
+         (t
+          (error "packlet: invalid value %S for :bind" form))))
+      (nreverse result)))
+
+  (defun packlet--normalize-customs (forms)
+    "Normalize FORMS under `:custom'."
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((packlet--custom-entry-p form)
+          (push form result))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (unless (packlet--custom-entry-p entry)
+              (error "packlet: invalid entry %S for :custom" entry))
+            (push entry result)))
+         (t
+          (error "packlet: invalid value %S for :custom" form))))
+      (nreverse result)))
+
   (defun packlet--demand-form (sections)
     "Return the `:demand' form from SECTIONS."
     (when-let ((entry (assq :demand sections)))
@@ -161,9 +329,34 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
         (`(,form) form)
         (_ (error "packlet: :demand accepts at most one form")))))
 
+  (defun packlet--idle-form (sections)
+    "Return the `:idle' form from SECTIONS."
+    (when-let ((entry (assq :idle sections)))
+      (pcase (cdr entry)
+        ('() t)
+        (`(,form) form)
+        (_ (error "packlet: :idle accepts at most one form")))))
+
+  (defun packlet--idle-delay (value)
+    "Normalize VALUE for `:idle'."
+    (cond
+     ((null value) nil)
+     ((eq value t) 1.0)
+     ((and (numberp value)
+           (>= value 0))
+      value)
+     (t
+      (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
+
   (defun packlet--hook-function-form (function)
     "Return a function form for FUNCTION suitable for `add-hook'."
-    `(function ,function)))
+    `(function ,function))
+
+  (defun packlet--key-form (key)
+    "Return a form that resolves KEY for key binding APIs."
+    (if (stringp key)
+        `(kbd ,key)
+      key)))
 
 ;;;###autoload
 (defmacro packlet (feature &rest body)
@@ -173,10 +366,15 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
     (error "packlet: FEATURE must be a symbol"))
   (let* ((sections (packlet--parse-body body))
          (init-forms (packlet--section sections :init))
+         (custom-forms (packlet--normalize-customs
+                        (packlet--section sections :custom)))
          (config-forms (packlet--section sections :config))
          (commands (packlet--normalize-symbols
                     (packlet--section sections :commands)
                     :commands))
+         (autoloads (packlet--normalize-symbols
+                     (packlet--section sections :autoload)
+                     :autoload))
          (modes (packlet--normalize-pairs
                  (packlet--section sections :mode)
                  :mode
@@ -185,23 +383,44 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
                  (packlet--section sections :hook)
                  :hook
                  #'packlet--hook-entry-p))
-         (bindings (packlet--normalize-pairs
-                    (packlet--section sections :bind)
-                    :bind
-                    #'packlet--bind-entry-p))
+         (bindings (packlet--normalize-bindings
+                    (packlet--section sections :bind)))
          (afters (packlet--normalize-symbols
                   (packlet--section sections :after)
                   :after))
+         (idle-form (packlet--idle-form sections))
          (demand-form (packlet--demand-form sections))
-         (file (symbol-name feature))
+         (functions (packlet--normalize-symbols
+                     (packlet--section sections :functions)
+                     :functions))
+         (defines (packlet--normalize-symbols
+                   (packlet--section sections :defines)
+                   :defines))
+         (file (packlet--file-form sections feature))
          (configured-var (intern (format "packlet--configured-%s" feature)))
          (config-function (intern (format "packlet--configure-%s" feature))))
     `(progn
+       ,@(mapcar
+          (lambda (variable)
+            `(defvar ,variable))
+          defines)
+       ,@(mapcar
+          (lambda (function)
+            `(declare-function ,function ,file))
+          functions)
        ,@init-forms
+       ,@(mapcar
+          (lambda (setting)
+            `(setopt ,(car setting) ,(cadr setting)))
+          custom-forms)
        ,@(mapcar
           (lambda (command)
             `(packlet--maybe-autoload ',command ,file t))
           commands)
+       ,@(mapcar
+          (lambda (function)
+            `(packlet--maybe-autoload ',function ,file nil))
+          autoloads)
        ,@(mapcar
           (lambda (mode)
             `(progn
@@ -218,14 +437,26 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
           hooks)
        ,@(mapcar
           (lambda (binding)
-            `(progn
-               (packlet--maybe-autoload ',(cdr binding) ,file t)
-               (global-set-key
-                ,(if (stringp (car binding))
-                     `(kbd ,(car binding))
-                   (car binding))
-                ',(cdr binding))))
+            (pcase binding
+              (`(:global ,key ,command)
+               `(progn
+                  (packlet--maybe-autoload ',command ,file t)
+                  (global-set-key
+                   ,(packlet--key-form key)
+                   ',command)))
+              (`(:map ,keymap ,key ,command)
+               `(progn
+                  (packlet--maybe-autoload ',command ,file t)
+                  (packlet--register-keymap-binding
+                   ',feature
+                   ',keymap
+                   ,(packlet--key-form key)
+                  ',command
+                   ',afters)))))
           bindings)
+       ,@(when (packlet--has-section-p sections :idle)
+           `((when-let ((delay (packlet--idle-delay ,idle-form)))
+               (packlet--register-idle-load ',feature ',afters ,file delay))))
        ,@(when config-forms
            `((defvar ,configured-var nil)
              (defun ,config-function ()
@@ -241,7 +472,7 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
               ',afters)))
        ,@(when (packlet--has-section-p sections :demand)
            `((when ,demand-form
-               (packlet--register-demand-load ',feature ',afters)))))))
+               (packlet--register-demand-load ',feature ',afters ,file)))))))
 
 (provide 'packlet)
 
