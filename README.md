@@ -75,8 +75,10 @@ Clone this repository and add it to `load-path`:
   Symbols to autoload. `packlet` prefers package autoload definitions when
   available and otherwise falls back to the package file.
 - `:autoload`
-  Non-interactive function symbols to autoload with the same resolution rules
-  as `:commands`.
+  Function symbols to autoload with the same resolution rules as `:commands`.
+  A bare symbol is registered as non-interactive from the package file.
+  A tuple `(function "file")` autoloads from a specific file as non-interactive.
+  A tuple `(function "file" t)` autoloads from a specific file as interactive.
 - `:mode`
   `("\\\\.ext\\\\'" . some-mode)` pairs added to `auto-mode-alist`.
 - `:hook`

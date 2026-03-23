@@ -275,6 +275,41 @@ FEATURE and AFTERS are watched for opportunities to install the binding."
           (error "packlet: invalid value %S for %S" form keyword))))
       (nreverse result)))
 
+  (defun packlet--autoload-entry-p (value)
+    "Return non-nil when VALUE is a valid `:autoload' tuple entry.
+A tuple entry is (FUNCTION FILE) or (FUNCTION FILE INTERACTIVE)."
+    (and (consp value)
+         (symbolp (car value))
+         (stringp (cadr value))
+         (or (null (cddr value))
+             (and (consp (cddr value))
+                  (null (cdddr value))))))
+
+  (defun packlet--normalize-autoloads (forms)
+    "Normalize FORMS under `:autoload' into a list of (FUNCTION FILE INTERACTIVE).
+Each form may be a symbol, a list of symbols, a tuple (FUNCTION FILE),
+a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((null form))
+         ((symbolp form)
+          (push (list form nil nil) result))
+         ((packlet--autoload-entry-p form)
+          (push (list (car form) (cadr form) (caddr form)) result))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (cond
+             ((symbolp entry)
+              (push (list entry nil nil) result))
+             ((packlet--autoload-entry-p entry)
+              (push (list (car entry) (cadr entry) (caddr entry)) result))
+             (t
+              (error "packlet: invalid entry %S for :autoload" entry)))))
+         (t
+          (error "packlet: invalid value %S for :autoload" form))))
+      (nreverse result)))
+
   (defun packlet--normalize-bindings (forms)
     "Normalize FORMS under `:bind'."
     (let (result)
@@ -372,9 +407,8 @@ FEATURE and AFTERS are watched for opportunities to install the binding."
          (commands (packlet--normalize-symbols
                     (packlet--section sections :commands)
                     :commands))
-         (autoloads (packlet--normalize-symbols
-                     (packlet--section sections :autoload)
-                     :autoload))
+         (autoloads (packlet--normalize-autoloads
+                     (packlet--section sections :autoload)))
          (modes (packlet--normalize-pairs
                  (packlet--section sections :mode)
                  :mode
@@ -418,8 +452,11 @@ FEATURE and AFTERS are watched for opportunities to install the binding."
             `(packlet--maybe-autoload ',command ,file t))
           commands)
        ,@(mapcar
-          (lambda (function)
-            `(packlet--maybe-autoload ',function ,file nil))
+          (lambda (entry)
+            (let ((function (nth 0 entry))
+                  (entry-file (nth 1 entry))
+                  (interactive (nth 2 entry)))
+              `(packlet--maybe-autoload ',function ,(or entry-file file) ,interactive)))
           autoloads)
        ,@(mapcar
           (lambda (mode)

@@ -137,6 +137,43 @@
         (global-unset-key key))
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-multiple-hooks-register-and-run ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (emacs-startup-hook nil)
+         (after-change-major-mode-hook nil))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature 'packlet-test-multi-hook-feature)
+          (packlet-test--cleanup-symbols
+           '(packlet-test-startup-hook
+             packlet-test-major-mode-hook
+             packlet-test-startup-hook-ran
+             packlet-test-major-mode-hook-ran))
+          (packlet-test--write-feature
+           directory
+           'packlet-test-multi-hook-feature
+           "(defvar packlet-test-startup-hook-ran nil)\n\
+(defvar packlet-test-major-mode-hook-ran nil)\n\
+(defun packlet-test-startup-hook ()\n\
+  (setq packlet-test-startup-hook-ran t))\n\
+(defun packlet-test-major-mode-hook ()\n\
+  (setq packlet-test-major-mode-hook-ran t))")
+          (packlet packlet-test-multi-hook-feature
+            :hook ((emacs-startup-hook . packlet-test-startup-hook)
+                   (after-change-major-mode-hook . packlet-test-major-mode-hook)))
+          (run-hooks 'emacs-startup-hook)
+          (run-hooks 'after-change-major-mode-hook)
+          (should (bound-and-true-p packlet-test-startup-hook-ran))
+          (should (bound-and-true-p packlet-test-major-mode-hook-ran)))
+      (packlet-test--cleanup-feature 'packlet-test-multi-hook-feature)
+      (packlet-test--cleanup-symbols
+       '(packlet-test-startup-hook
+         packlet-test-major-mode-hook
+         packlet-test-startup-hook-ran
+         packlet-test-major-mode-hook-ran))
+      (delete-directory directory t))))
+
 (ert-deftest packlet-test-demand-load-after-feature ()
   (let* ((directory (make-temp-file "packlet-test-" t))
          (load-path (cons directory load-path)))
@@ -437,6 +474,76 @@
             (should (file-exists-p compiled-file))))
       (when (file-exists-p compiled-file)
         (delete-file compiled-file))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-autoload-with-file-and-interactive ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-autoload-extended)
+         (symbols '(packlet-test-al-simple
+                    packlet-test-al-custom-file
+                    packlet-test-al-interactive
+                    packlet-test-al-simple-ran
+                    packlet-test-al-custom-ran
+                    packlet-test-al-interactive-ran)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols symbols)
+          ;; Main feature file
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-al-simple-ran nil)\n\
+(defun packlet-test-al-simple ()\n\
+  (setq packlet-test-al-simple-ran t))")
+          ;; Separate library for custom-file autoload
+          (packlet-test--write-library
+           directory
+           'packlet-test-al-lib
+           'packlet-test-al-lib
+           "(defvar packlet-test-al-custom-ran nil)\n\
+(defun packlet-test-al-custom-file ()\n\
+  (setq packlet-test-al-custom-ran t))")
+          ;; Separate library for interactive autoload
+          (packlet-test--write-library
+           directory
+           'packlet-test-al-cmd
+           'packlet-test-al-cmd
+           "(defvar packlet-test-al-interactive-ran nil)\n\
+(defun packlet-test-al-interactive ()\n\
+  (interactive)\n\
+  (setq packlet-test-al-interactive-ran t))")
+          (eval
+           `(packlet ,feature
+              :autoload
+              packlet-test-al-simple
+              (packlet-test-al-custom-file "packlet-test-al-lib")
+              (packlet-test-al-interactive "packlet-test-al-cmd" t)))
+          ;; Bare symbol: autoloaded from default file, non-interactive
+          (should (autoloadp (symbol-function 'packlet-test-al-simple)))
+          (should (equal (nth 1 (symbol-function 'packlet-test-al-simple))
+                         "packlet-test-autoload-extended"))
+          (should-not (nth 3 (symbol-function 'packlet-test-al-simple)))
+          ;; Tuple (fn "file"): autoloaded from custom file, non-interactive
+          (should (autoloadp (symbol-function 'packlet-test-al-custom-file)))
+          (should (equal (nth 1 (symbol-function 'packlet-test-al-custom-file))
+                         "packlet-test-al-lib"))
+          (should-not (nth 3 (symbol-function 'packlet-test-al-custom-file)))
+          ;; Tuple (fn "file" t): autoloaded from custom file, interactive
+          (should (autoloadp (symbol-function 'packlet-test-al-interactive)))
+          (should (equal (nth 1 (symbol-function 'packlet-test-al-interactive))
+                         "packlet-test-al-cmd"))
+          (should (nth 3 (symbol-function 'packlet-test-al-interactive)))
+          ;; Verify the autoloads actually work
+          (funcall 'packlet-test-al-custom-file)
+          (should (bound-and-true-p packlet-test-al-custom-ran))
+          (call-interactively 'packlet-test-al-interactive)
+          (should (bound-and-true-p packlet-test-al-interactive-ran)))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-feature 'packlet-test-al-lib)
+      (packlet-test--cleanup-feature 'packlet-test-al-cmd)
+      (packlet-test--cleanup-symbols symbols)
       (delete-directory directory t))))
 
 ;;; packlet-test.el ends here
