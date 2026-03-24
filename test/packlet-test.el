@@ -546,4 +546,79 @@
       (packlet-test--cleanup-symbols symbols)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-setq-keyword ()
+  (let ((packlet-test-setq-a nil)
+        (packlet-test-setq-b nil))
+    (packlet packlet-test-setq-feature
+      :setq ((packlet-test-setq-a 42)
+             (packlet-test-setq-b "hello")))
+    (should (= packlet-test-setq-a 42))
+    (should (equal packlet-test-setq-b "hello"))))
+
+(ert-deftest packlet-test-load-keyword ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path)))
+    (unwind-protect
+        (progn
+          (packlet-test--write-file
+           (expand-file-name "packlet-test-loadable.el" directory)
+           "(defvar packlet-test-loaded-marker t)")
+          (should-not (boundp 'packlet-test-loaded-marker))
+          (packlet packlet-test-load-feature
+            :load "packlet-test-loadable")
+          (should (bound-and-true-p packlet-test-loaded-marker)))
+      (when (boundp 'packlet-test-loaded-marker)
+        (makunbound 'packlet-test-loaded-marker))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-after-load-keyword ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (after-load-result nil))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature 'packlet-test-after-load-dep)
+          (packlet-test--write-feature
+           directory
+           'packlet-test-after-load-dep
+           "(defvar packlet-test-after-load-dep-loaded t)")
+          (packlet packlet-test-after-load-feature
+            :after-load
+            (packlet-test-after-load-dep
+             (setq after-load-result t)))
+          (should-not after-load-result)
+          (require 'packlet-test-after-load-dep)
+          (should after-load-result))
+      (packlet-test--cleanup-feature 'packlet-test-after-load-dep)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-user-defined-keyword ()
+  (defvar packlet-test-user-kw-result nil)
+  (let ((packlet--user-keywords nil))
+    (unwind-protect
+        (progn
+          (setq packlet-test-user-kw-result nil)
+          (packlet-define-keyword :my-test-kw
+            :normalize (lambda (forms)
+                         (mapcar #'symbol-name
+                                 (packlet--normalize-symbols forms :my-test-kw)))
+            :expand (lambda (ctx forms)
+                      (let ((feature (plist-get ctx :feature)))
+                        (mapcar (lambda (name)
+                                  `(push (cons ',feature ,name)
+                                         packlet-test-user-kw-result))
+                                forms))))
+          (should (assq :my-test-kw packlet--user-keywords))
+          (eval '(packlet packlet-test-user-kw-feature
+                   :my-test-kw (alpha beta)))
+          (should (equal (nreverse packlet-test-user-kw-result)
+                         '((packlet-test-user-kw-feature . "alpha")
+                           (packlet-test-user-kw-feature . "beta")))))
+      (setq packlet-test-user-kw-result nil))))
+
+(ert-deftest packlet-test-user-keyword-rejects-builtin ()
+  (should-error (packlet-define-keyword :init
+                  :expand #'ignore)
+                :type 'error))
+
 ;;; packlet-test.el ends here

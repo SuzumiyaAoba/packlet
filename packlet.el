@@ -151,12 +151,22 @@ FEATURE and AFTERS are watched for opportunities to install the binding."
 
 (eval-and-compile
   (defconst packlet--keywords
-    '(:file :init :custom :config :commands :autoload :mode :hook :bind
-            :after :idle :demand :functions :defines))
+    '(:file :init :setq :custom :load :config :commands :autoload :mode :hook
+            :bind :after :after-load :idle :demand :functions :defines))
+
+  (defvar packlet--user-keywords nil
+    "Alist of (KEYWORD . PLIST) for user-defined keywords.
+Each PLIST may contain:
+  :normalize  Function taking (FORMS) and returning normalized forms.
+              Called at macro-expansion time.
+  :expand     Function taking (CONTEXT FORMS) and returning a list of
+              Lisp forms to splice into the expansion.  CONTEXT is a
+              plist with :feature, :file, :afters, and :sections.")
 
   (defun packlet--keyword-p (form)
     "Return non-nil when FORM is a supported `packlet' keyword."
-    (memq form packlet--keywords))
+    (or (memq form packlet--keywords)
+        (assq form packlet--user-keywords)))
 
   (defun packlet--proper-list-p (value)
     "Return non-nil when VALUE is a proper list."
@@ -383,6 +393,44 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
      (t
       (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
 
+  (defun packlet--normalize-loads (forms)
+    "Normalize FORMS under `:load' into a flat list of library name strings."
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((stringp form) (push form result))
+         ((symbolp form) (push (symbol-name form) result))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (cond
+             ((stringp entry) (push entry result))
+             ((symbolp entry) (push (symbol-name entry) result))
+             (t (error "packlet: :load entries must be strings or symbols, got %S" entry)))))
+         (t (error "packlet: invalid value %S for :load" form))))
+      (nreverse result)))
+
+  (defun packlet--after-load-entry-p (value)
+    "Return non-nil when VALUE is a valid `:after-load' entry.
+An entry is (FEATURE BODY...) where FEATURE is a symbol."
+    (and (consp value)
+         (symbolp (car value))
+         (cdr value)))
+
+  (defun packlet--normalize-after-loads (forms)
+    "Normalize FORMS under `:after-load' into a list of (FEATURE BODY...) entries."
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((packlet--after-load-entry-p form)
+          (push form result))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (unless (packlet--after-load-entry-p entry)
+              (error "packlet: :after-load entries must be (FEATURE BODY...), got %S" entry))
+            (push entry result)))
+         (t (error "packlet: invalid value %S for :after-load" form))))
+      (nreverse result)))
+
   (defun packlet--hook-function-form (function)
     "Return a function form for FUNCTION suitable for `add-hook'."
     `(function ,function))
@@ -391,7 +439,58 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
     "Return a form that resolves KEY for key binding APIs."
     (if (stringp key)
         `(kbd ,key)
-      key)))
+      key))
+
+  (defun packlet--expand-user-keywords (sections feature file afters)
+    "Expand user-defined keywords found in SECTIONS.
+FEATURE, FILE, and AFTERS provide the packlet context."
+    (let (forms)
+      (dolist (entry packlet--user-keywords)
+        (let* ((kw (car entry))
+               (props (cdr entry))
+               (raw (packlet--section sections kw)))
+          (when raw
+            (let* ((normalizer (plist-get props :normalize))
+                   (expander (plist-get props :expand))
+                   (normalized (if normalizer (funcall normalizer raw) raw))
+                   (context (list :feature feature :file file
+                                  :afters afters :sections sections)))
+              (when expander
+                (setq forms (append forms (funcall expander context normalized))))))))
+      forms)))
+
+;;;###autoload
+(defun packlet-define-keyword (keyword &rest props)
+  "Register KEYWORD as a user-defined packlet keyword.
+PROPS is a plist with the following keys:
+
+  :normalize  Function taking (FORMS) and returning normalized forms.
+              Called at macro-expansion time.  Optional; when omitted,
+              raw forms are passed through unchanged.
+
+  :expand     Function taking (CONTEXT FORMS) and returning a list of
+              Lisp forms to splice into the `packlet' expansion.
+              CONTEXT is a plist with :feature, :file, :afters, and
+              :sections.
+
+Both functions run at macro-expansion time and must be defined in an
+`eval-and-compile' block or loaded before any `packlet' form that
+uses the keyword.
+
+Example:
+
+  (eval-and-compile
+    (packlet-define-keyword :my-keyword
+      :expand (lambda (ctx forms)
+                (let ((feature (plist-get ctx :feature)))
+                  (mapcar (lambda (f) \\=`(message \"%s: %S\" \\=',feature \\=',f))
+                          forms)))))"
+  (declare (indent 1))
+  (unless (keywordp keyword)
+    (error "packlet-define-keyword: KEYWORD must be a keyword symbol, got %S" keyword))
+  (when (memq keyword packlet--keywords)
+    (error "packlet-define-keyword: %S is a built-in keyword and cannot be redefined" keyword))
+  (setf (alist-get keyword packlet--user-keywords) props))
 
 ;;;###autoload
 (defmacro packlet (feature &rest body)
@@ -401,8 +500,12 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
     (error "packlet: FEATURE must be a symbol"))
   (let* ((sections (packlet--parse-body body))
          (init-forms (packlet--section sections :init))
+         (setq-forms (packlet--normalize-customs
+                      (packlet--section sections :setq)))
          (custom-forms (packlet--normalize-customs
                         (packlet--section sections :custom)))
+         (load-libs (packlet--normalize-loads
+                     (packlet--section sections :load)))
          (config-forms (packlet--section sections :config))
          (commands (packlet--normalize-symbols
                     (packlet--section sections :commands)
@@ -422,6 +525,8 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
          (afters (packlet--normalize-symbols
                   (packlet--section sections :after)
                   :after))
+         (after-loads (packlet--normalize-after-loads
+                       (packlet--section sections :after-load)))
          (idle-form (packlet--idle-form sections))
          (demand-form (packlet--demand-form sections))
          (functions (packlet--normalize-symbols
@@ -432,7 +537,8 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
                    :defines))
          (file (packlet--file-form sections feature))
          (configured-var (intern (format "packlet--configured-%s" feature)))
-         (config-function (intern (format "packlet--configure-%s" feature))))
+         (config-function (intern (format "packlet--configure-%s" feature)))
+         (user-forms (packlet--expand-user-keywords sections feature file afters)))
     `(progn
        ,@(mapcar
           (lambda (variable)
@@ -442,11 +548,19 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
           (lambda (function)
             `(declare-function ,function ,file))
           functions)
-       ,@init-forms
+       ,@(mapcar
+          (lambda (setting)
+            `(setq ,(car setting) ,(cadr setting)))
+          setq-forms)
        ,@(mapcar
           (lambda (setting)
             `(setopt ,(car setting) ,(cadr setting)))
           custom-forms)
+       ,@(mapcar
+          (lambda (lib)
+            `(load ,lib t 'nomessage))
+          load-libs)
+       ,@init-forms
        ,@(mapcar
           (lambda (command)
             `(packlet--maybe-autoload ',command ,file t))
@@ -491,6 +605,12 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
                   ',command
                    ',afters)))))
           bindings)
+       ,@(mapcar
+          (lambda (entry)
+            `(with-eval-after-load ',(car entry)
+               ,@(cdr entry)))
+          after-loads)
+       ,@user-forms
        ,@(when (packlet--has-section-p sections :idle)
            `((when-let ((delay (packlet--idle-delay ,idle-form)))
                (packlet--register-idle-load ',feature ',afters ,file delay))))
