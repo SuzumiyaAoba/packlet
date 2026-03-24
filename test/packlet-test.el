@@ -621,4 +621,84 @@
                   :expand #'ignore)
                 :type 'error))
 
+(ert-deftest packlet-test-delayed-hook-schedules-idle-timer ()
+  "Delayed hook entries should schedule an idle timer instead of calling directly."
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (scheduled nil)
+         (timer-id 0))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature 'packlet-test-delayed-hook-feature)
+          (packlet-test--cleanup-symbols
+           '(packlet-test-delayed-fn packlet-test-delayed-ran))
+          (defvar packlet-test-delayed-schedule-hook nil)
+          (setq packlet-test-delayed-schedule-hook nil)
+          (packlet-test--write-feature
+           directory
+           'packlet-test-delayed-hook-feature
+           "(defvar packlet-test-delayed-ran nil)\n\
+(defun packlet-test-delayed-fn ()\n\
+  (setq packlet-test-delayed-ran t))")
+          (cl-letf (((symbol-function 'run-with-idle-timer)
+                     (lambda (secs repeat fn &rest args)
+                       (let ((timer (list :timer (cl-incf timer-id))))
+                         (push (list :timer timer :secs secs :repeat repeat
+                                     :fn fn :args args)
+                               scheduled)
+                         timer)))
+                    ((symbol-function 'timerp)
+                     (lambda (object)
+                       (and (consp object)
+                            (eq (car object) :timer)))))
+            (eval
+             `(packlet packlet-test-delayed-hook-feature
+                :hook ((packlet-test-delayed-schedule-hook packlet-test-delayed-fn 2.0))))
+            ;; Hook should not have run the function directly
+            (run-hooks 'packlet-test-delayed-schedule-hook)
+            (should (= (length scheduled) 1))
+            (should (= (plist-get (car scheduled) :secs) 2.0))
+            ;; Simulate the idle timer firing
+            (packlet-test--invoke-scheduled-timer (car scheduled))
+            (should (bound-and-true-p packlet-test-delayed-ran))))
+      (packlet-test--cleanup-feature 'packlet-test-delayed-hook-feature)
+      (packlet-test--cleanup-symbols
+       '(packlet-test-delayed-fn packlet-test-delayed-ran
+         packlet-test-delayed-schedule-hook))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-delayed-hook-debounces ()
+  "Delayed hook should cancel previous timer when hook fires again."
+  (let* ((scheduled nil)
+         (cancelled nil)
+         (timer-id 0))
+    (defvar packlet-test-debounce-hook nil)
+    (setq packlet-test-debounce-hook nil)
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-with-idle-timer)
+                   (lambda (secs repeat fn &rest args)
+                     (let ((timer (list :timer (cl-incf timer-id))))
+                       (push (list :timer timer :secs secs :repeat repeat
+                                   :fn fn :args args)
+                             scheduled)
+                       timer)))
+                  ((symbol-function 'timerp)
+                   (lambda (object)
+                     (and (consp object)
+                          (eq (car object) :timer))))
+                  ((symbol-function 'cancel-timer)
+                   (lambda (timer)
+                     (push timer cancelled))))
+          (eval
+           `(packlet packlet-test-debounce-feature
+              :hook ((packlet-test-debounce-hook ignore 1.0))))
+          ;; Fire hook twice
+          (run-hooks 'packlet-test-debounce-hook)
+          (should (= (length scheduled) 1))
+          (run-hooks 'packlet-test-debounce-hook)
+          ;; Second call should have cancelled the first timer
+          (should (= (length cancelled) 1))
+          (should (= (length scheduled) 2)))
+      (packlet-test--cleanup-symbols '(packlet-test-debounce-hook)))))
+
 ;;; packlet-test.el ends here

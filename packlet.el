@@ -248,6 +248,22 @@ Each PLIST may contain:
                (and (consp function)
                     (eq (car function) 'lambda))))))
 
+  (defun packlet--delayed-hook-entry-p (value)
+    "Return non-nil when VALUE is a delayed `:hook' entry (HOOK FUNCTION DELAY)."
+    (and (consp value)
+         (symbolp (car value))
+         (consp (cdr value))
+         (let ((function (cadr value)))
+           (or (symbolp function)
+               (and (consp function)
+                    (eq (car function) 'lambda))))
+         (consp (cddr value))
+         (numberp (caddr value))
+         (null (cdddr value))))
+
+  (defvar packlet--delayed-hook-counter 0
+    "Counter for generating unique delayed-hook timer variables.")
+
   (defun packlet--bind-entry-p (value)
     "Return non-nil when VALUE is a valid `:bind' entry."
     (and (consp value)
@@ -283,6 +299,29 @@ Each PLIST may contain:
             (push entry result)))
          (t
           (error "packlet: invalid value %S for %S" form keyword))))
+      (nreverse result)))
+
+  (defun packlet--normalize-hooks (forms)
+    "Normalize FORMS under `:hook' into a flat list of hook entries.
+Each entry is either (HOOK . FUNCTION) or (HOOK FUNCTION DELAY)."
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((packlet--hook-entry-p form)
+          (push form result))
+         ((packlet--delayed-hook-entry-p form)
+          (push form result))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (cond
+             ((packlet--hook-entry-p entry)
+              (push entry result))
+             ((packlet--delayed-hook-entry-p entry)
+              (push entry result))
+             (t
+              (error "packlet: invalid entry %S for :hook" entry)))))
+         (t
+          (error "packlet: invalid value %S for :hook" form))))
       (nreverse result)))
 
   (defun packlet--autoload-entry-p (value)
@@ -516,10 +555,8 @@ Example:
                  (packlet--section sections :mode)
                  :mode
                  #'packlet--mode-entry-p))
-         (hooks (packlet--normalize-pairs
-                 (packlet--section sections :hook)
-                 :hook
-                 #'packlet--hook-entry-p))
+         (hooks (packlet--normalize-hooks
+                 (packlet--section sections :hook)))
          (bindings (packlet--normalize-bindings
                     (packlet--section sections :bind)))
          (afters (packlet--normalize-symbols
@@ -578,13 +615,33 @@ Example:
                (packlet--maybe-autoload ',(cdr mode) ,file t)
                (add-to-list 'auto-mode-alist ',mode)))
           modes)
-       ,@(mapcar
+       ,@(cl-mapcan
           (lambda (hook)
-            `(progn
-               ,(when (symbolp (cdr hook))
-                  `(packlet--maybe-autoload ',(cdr hook) ,file nil))
-               (add-hook ',(car hook)
-                         ,(packlet--hook-function-form (cdr hook)))))
+            (if (packlet--delayed-hook-entry-p hook)
+                (let* ((hook-var (car hook))
+                       (function (cadr hook))
+                       (delay (caddr hook))
+                       (timer-var (intern (format "packlet--delayed-hook-timer-%s-%d"
+                                                  feature
+                                                  (cl-incf packlet--delayed-hook-counter)))))
+                  `((defvar ,timer-var nil)
+                    ,@(when (symbolp function)
+                        `((packlet--maybe-autoload ',function ,file nil)))
+                    (add-hook ',hook-var
+                              (lambda ()
+                                (when (timerp ,timer-var)
+                                  (cancel-timer ,timer-var))
+                                (setq ,timer-var
+                                      (run-with-idle-timer
+                                       ,delay nil
+                                       (lambda ()
+                                         (setq ,timer-var nil)
+                                         (funcall ,(packlet--hook-function-form function)))))))))
+              `((progn
+                  ,(when (symbolp (cdr hook))
+                     `(packlet--maybe-autoload ',(cdr hook) ,file nil))
+                  (add-hook ',(car hook)
+                            ,(packlet--hook-function-form (cdr hook)))))))
           hooks)
        ,@(mapcar
           (lambda (binding)
