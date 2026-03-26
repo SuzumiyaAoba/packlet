@@ -19,6 +19,9 @@
 
 (declare-function packlet--configure-packlet-test-feature "packlet-test" ())
 (declare-function packlet-test-hook "packlet-test-feature" ())
+(declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
+(declare-function packlet-test-major-mode-hook "packlet-test-multi-hook-feature" ())
+(declare-function packlet-test-al-custom-file "packlet-test-al-lib" ())
 
 (defun packlet-test--write-file (file contents)
   "Write CONTENTS to FILE."
@@ -197,6 +200,32 @@
           (should (featurep 'packlet-test-demand)))
       (packlet-test--cleanup-feature 'packlet-test-demand)
       (packlet-test--cleanup-feature 'packlet-test-after)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-multiple-packlet-configs-run-for-same-feature ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (config-a-ran nil)
+         (config-b-ran nil))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature 'packlet-test-shared-config)
+          (packlet-test--write-feature
+           directory
+           'packlet-test-shared-config
+           "(defvar packlet-test-shared-config-loaded t)")
+          (packlet packlet-test-shared-config
+            :config
+            (setq config-a-ran t))
+          (packlet packlet-test-shared-config
+            :config
+            (setq config-b-ran t))
+          (should-not config-a-ran)
+          (should-not config-b-ran)
+          (require 'packlet-test-shared-config)
+          (should config-a-ran)
+          (should config-b-ran))
+      (packlet-test--cleanup-feature 'packlet-test-shared-config)
       (delete-directory directory t))))
 
 (ert-deftest packlet-test-idle-keyword-registers-loader ()
@@ -417,6 +446,64 @@
           (global-set-key key old-binding)
         (global-unset-key key))
       (delete-directory directory t))))
+
+(ert-deftest packlet-test-maybe-autoload-upgrades-fallback-definition ()
+  (let* ((fallback-directory (make-temp-file "packlet-test-fallback-" t))
+         (autoload-directory (make-temp-file "packlet-test-autoloads-" t))
+         (load-path (cons fallback-directory load-path))
+         (autoloads-feature 'packlet-test-upgrade-feature-autoloads)
+         (symbols '(packlet-test-upgrade-command
+                    packlet-test-upgrade-command-ran)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature autoloads-feature)
+          (packlet-test--cleanup-feature 'packlet-test-upgrade-sub)
+          (packlet-test--cleanup-symbols symbols)
+          (remhash "packlet-test-upgrade-feature-autoloads"
+                   packlet--loaded-autoloads)
+          (packlet-test--write-library
+           fallback-directory
+           'packlet-test-upgrade-feature
+           'packlet-test-upgrade-feature
+           "(defvar packlet-test-upgrade-feature-loaded t)")
+          (packlet-test--write-library
+           autoload-directory
+           'packlet-test-upgrade-sub
+           'packlet-test-upgrade-sub
+           "(defvar packlet-test-upgrade-command-ran nil)\n\
+(defun packlet-test-upgrade-command ()\n\
+  (interactive)\n\
+  (setq packlet-test-upgrade-command-ran t))")
+          (packlet-test--write-file
+           (expand-file-name "packlet-test-upgrade-feature-autoloads.el"
+                             autoload-directory)
+           ";;; packlet-test-upgrade-feature-autoloads.el --- Generated autoloads -*- lexical-binding: t; -*-\n\n\
+(autoload 'packlet-test-upgrade-command \"packlet-test-upgrade-sub\" nil t)\n\
+(provide 'packlet-test-upgrade-feature-autoloads)\n")
+          (packlet--maybe-autoload
+           'packlet-test-upgrade-command
+           "packlet-test-upgrade-feature"
+           t)
+          (should (autoloadp (symbol-function 'packlet-test-upgrade-command)))
+          (should (equal (nth 1 (symbol-function 'packlet-test-upgrade-command))
+                         "packlet-test-upgrade-feature"))
+          (setq load-path (cons autoload-directory load-path))
+          (packlet--maybe-autoload
+           'packlet-test-upgrade-command
+           "packlet-test-upgrade-feature"
+           t)
+          (should (equal (nth 1 (symbol-function 'packlet-test-upgrade-command))
+                         "packlet-test-upgrade-sub"))
+          (call-interactively 'packlet-test-upgrade-command)
+          (should (bound-and-true-p packlet-test-upgrade-command-ran)))
+      (packlet-test--cleanup-feature autoloads-feature)
+      (packlet-test--cleanup-feature 'packlet-test-upgrade-sub)
+      (packlet-test--cleanup-feature 'packlet-test-upgrade-feature)
+      (packlet-test--cleanup-symbols symbols)
+      (remhash "packlet-test-upgrade-feature-autoloads"
+               packlet--loaded-autoloads)
+      (delete-directory fallback-directory t)
+      (delete-directory autoload-directory t))))
 
 (ert-deftest packlet-test-file-demand-load ()
   (let* ((directory (make-temp-file "packlet-test-" t))
@@ -700,5 +787,12 @@
           (should (= (length cancelled) 1))
           (should (= (length scheduled) 2)))
       (packlet-test--cleanup-symbols '(packlet-test-debounce-hook)))))
+
+(ert-deftest packlet-test-delayed-hook-rejects-negative-delay ()
+  (should-error
+   (eval
+    '(packlet packlet-test-negative-delay
+       :hook ((packlet-test-negative-delay-hook ignore -1.0))))
+   :type 'error))
 
 ;;; packlet-test.el ends here
