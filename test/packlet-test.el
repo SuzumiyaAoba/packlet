@@ -16,8 +16,11 @@
 (defvar packlet-test-hook-ran)
 (defvar packlet-test-helper-ran)
 (defvar packlet-test-custom-value)
+(defvar packlet-test-compile-variable)
+(defvar packlet-test-compile-function-ran)
+(defvar packlet-test-compile-config-ran)
+(defvar packlet-test-compile-second-config-ran)
 
-(declare-function packlet--configure-packlet-test-feature "packlet-test" ())
 (declare-function packlet-test-hook "packlet-test-feature" ())
 (declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
 (declare-function packlet-test-major-mode-hook "packlet-test-multi-hook-feature" ())
@@ -52,12 +55,18 @@
   "Unload FEATURE and clear generated helper symbols."
   (when (featurep feature)
     (ignore-errors (unload-feature feature t)))
-  (let ((configured-var (intern (format "packlet--configured-%s" feature)))
-        (configure-fn (intern (format "packlet--configure-%s" feature))))
-    (when (boundp configured-var)
-      (makunbound configured-var))
-    (when (fboundp configure-fn)
-      (fmakunbound configure-fn))))
+  (let ((configured-prefix (format "packlet--configured-%s-" feature))
+        (configure-prefix (format "packlet--configure-%s-" feature)))
+    (mapatoms
+     (lambda (symbol)
+       (let ((name (symbol-name symbol)))
+         (when (or (string-prefix-p configured-prefix name)
+                   (string-prefix-p configure-prefix name))
+           (when (boundp symbol)
+             (makunbound symbol))
+           (when (fboundp symbol)
+             (fmakunbound symbol))
+           (unintern name nil)))))))
 
 (defun packlet-test--cleanup-symbols (symbols)
   "Unbind and undefine SYMBOLS."
@@ -533,34 +542,56 @@
          (library-file 'packlet-test-compile-library)
          (config-file (expand-file-name "packlet-test-config.el" directory))
          (compiled-file (concat config-file "c"))
-         (packlet-directory (file-name-directory (locate-library "packlet"))))
+         (packlet-directory (file-name-directory (locate-library "packlet")))
+         (symbols '(packlet-test-compile-variable
+                    packlet-test-compile-function
+                    packlet-test-compile-function-ran
+                    packlet-test-compile-config-ran
+                    packlet-test-compile-second-config-ran)))
     (unwind-protect
         (progn
+          (packlet-test--cleanup-feature library-feature)
+          (packlet-test--cleanup-symbols symbols)
           (packlet-test--write-library
            directory
            library-file
            library-feature
            "(defvar packlet-test-compile-variable nil)\n\
+(defvar packlet-test-compile-function-ran nil)\n\
 (defun packlet-test-compile-function ()\n\
-  packlet-test-compile-variable)")
+  (setq packlet-test-compile-function-ran packlet-test-compile-variable))")
           (packlet-test--write-file
            config-file
            ";;; packlet-test-config.el --- Generated test config -*- lexical-binding: t; -*-\n\n\
 (require 'packlet)\n\n\
+(defvar packlet-test-compile-config-ran nil)\n\
+(defvar packlet-test-compile-second-config-ran nil)\n\n\
 (packlet packlet-test-compile-feature\n\
   :file packlet-test-compile-library\n\
   :defines packlet-test-compile-variable\n\
   :functions packlet-test-compile-function\n\
   :custom (packlet-test-compile-variable 42)\n\
   :config\n\
+  (setq packlet-test-compile-config-ran t)\n\
   (when packlet-test-compile-variable\n\
-    (packlet-test-compile-function)))")
+    (packlet-test-compile-function)))\n\n\
+(packlet packlet-test-compile-feature\n\
+  :config\n\
+  (setq packlet-test-compile-second-config-ran t))")
           (let ((load-path (append (list directory packlet-directory) load-path))
                 (byte-compile-error-on-warn t))
             (should (byte-compile-file config-file))
-            (should (file-exists-p compiled-file))))
+            (should (file-exists-p compiled-file))
+            (load compiled-file nil t)
+            (load (symbol-name library-file) nil t)
+            (should (bound-and-true-p packlet-test-compile-config-ran))
+            (should (bound-and-true-p packlet-test-compile-second-config-ran))
+            (should (= packlet-test-compile-variable 42))
+            (should (= packlet-test-compile-function-ran 42))))
       (when (file-exists-p compiled-file)
         (delete-file compiled-file))
+      (packlet-test--cleanup-feature library-feature)
+      (packlet-test--cleanup-symbols symbols)
       (delete-directory directory t))))
 
 (ert-deftest packlet-test-autoload-with-file-and-interactive ()

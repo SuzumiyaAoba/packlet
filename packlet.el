@@ -180,10 +180,20 @@ Each PLIST may contain:
               Lisp forms to splice into the expansion.  CONTEXT is a
               plist with :feature, :file, :afters, and :sections.")
 
+  (defvar packlet--generated-symbol-counter 0
+    "Counter for generating unique helper symbols during macro expansion.")
+
   (defun packlet--keyword-p (form)
     "Return non-nil when FORM is a supported `packlet' keyword."
     (or (memq form packlet--keywords)
         (assq form packlet--user-keywords)))
+
+  (defun packlet--generated-symbol (prefix feature)
+    "Return an interned helper symbol for PREFIX and FEATURE."
+    (intern (format "%s-%s-%d"
+                    prefix
+                    (symbol-name feature)
+                    (cl-incf packlet--generated-symbol-counter))))
 
   (defun packlet--proper-list-p (value)
     "Return non-nil when VALUE is a proper list."
@@ -592,10 +602,12 @@ Example:
                    (packlet--section sections :defines)
                    :defines))
          (file (packlet--file-form sections feature))
-         (configured-var (make-symbol
-                          (format "packlet--configured-%s-" feature)))
-         (config-function (make-symbol
-                           (format "packlet--configure-%s-" feature)))
+         (configured-var (packlet--generated-symbol
+                          "packlet--configured"
+                          feature))
+         (config-function (packlet--generated-symbol
+                           "packlet--configure"
+                           feature))
          (user-forms (packlet--expand-user-keywords sections feature file afters)))
     `(progn
        ,@(mapcar
