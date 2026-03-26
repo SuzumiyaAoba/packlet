@@ -266,7 +266,8 @@ Each PLIST may contain:
                     (eq (car function) 'lambda))))))
 
   (defun packlet--delayed-hook-entry-p (value)
-    "Return non-nil when VALUE is a delayed `:hook' entry (HOOK FUNCTION DELAY)."
+    "Return non-nil when VALUE is a delayed `:hook' entry (HOOK FUNCTION DELAY).
+DELAY must be a non-negative number."
     (and (consp value)
          (symbolp (car value))
          (consp (cdr value))
@@ -276,6 +277,7 @@ Each PLIST may contain:
                     (eq (car function) 'lambda))))
          (consp (cddr value))
          (numberp (caddr value))
+         (>= (caddr value) 0)
          (null (cdddr value))))
 
   (defvar packlet--delayed-hook-counter 0
@@ -590,8 +592,10 @@ Example:
                    (packlet--section sections :defines)
                    :defines))
          (file (packlet--file-form sections feature))
-         (configured-var (intern (format "packlet--configured-%s" feature)))
-         (config-function (intern (format "packlet--configure-%s" feature)))
+         (configured-var (make-symbol
+                          (format "packlet--configured-%s-" feature)))
+         (config-function (make-symbol
+                           (format "packlet--configure-%s-" feature)))
          (user-forms (packlet--expand-user-keywords sections feature file afters)))
     `(progn
        ,@(mapcar
@@ -690,16 +694,16 @@ Example:
                (packlet--register-idle-load ',feature ',afters ,file delay))))
        ,@(when config-forms
            `((defvar ,configured-var nil)
-             (defun ,config-function ()
-               ,(format "Apply deferred configuration for `%s'." feature)
-               (when (and (not ,configured-var)
-                          (featurep ',feature)
-                          (packlet--all-features-loaded-p ',afters))
-                 (setq ,configured-var t)
-                 ,@config-forms))
+             (defalias ',config-function
+               (lambda ()
+                 (when (and (not ,configured-var)
+                            (featurep ',feature)
+                            (packlet--all-features-loaded-p ',afters))
+                   (setq ,configured-var t)
+                   ,@config-forms)))
              (packlet--register-after-load
               ',feature
-              (function ,config-function)
+              ',config-function
               ',afters)))
        ,@(when (packlet--has-section-p sections :demand)
            `((when ,demand-form

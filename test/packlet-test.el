@@ -202,6 +202,32 @@
       (packlet-test--cleanup-feature 'packlet-test-after)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-multiple-packlet-configs-run-for-same-feature ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (config-a-ran nil)
+         (config-b-ran nil))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature 'packlet-test-shared-config)
+          (packlet-test--write-feature
+           directory
+           'packlet-test-shared-config
+           "(defvar packlet-test-shared-config-loaded t)")
+          (packlet packlet-test-shared-config
+            :config
+            (setq config-a-ran t))
+          (packlet packlet-test-shared-config
+            :config
+            (setq config-b-ran t))
+          (should-not config-a-ran)
+          (should-not config-b-ran)
+          (require 'packlet-test-shared-config)
+          (should config-a-ran)
+          (should config-b-ran))
+      (packlet-test--cleanup-feature 'packlet-test-shared-config)
+      (delete-directory directory t))))
+
 (ert-deftest packlet-test-idle-keyword-registers-loader ()
   (let (calls)
     (cl-letf (((symbol-function 'packlet--register-idle-load)
@@ -761,5 +787,12 @@
           (should (= (length cancelled) 1))
           (should (= (length scheduled) 2)))
       (packlet-test--cleanup-symbols '(packlet-test-debounce-hook)))))
+
+(ert-deftest packlet-test-delayed-hook-rejects-negative-delay ()
+  (should-error
+   (eval
+    '(packlet packlet-test-negative-delay
+       :hook ((packlet-test-negative-delay-hook ignore -1.0))))
+   :type 'error))
 
 ;;; packlet-test.el ends here
