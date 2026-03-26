@@ -32,17 +32,33 @@
   "Return non-nil when every feature in FEATURES is loaded."
   (cl-every #'featurep features))
 
+(defun packlet--current-autoload-file (function)
+  "Return FUNCTION's current autoload file, or nil when unavailable."
+  (when-let ((definition (and (fboundp function)
+                              (symbol-function function))))
+    (when (autoloadp definition)
+      (nth 1 definition))))
+
+(defun packlet--fallback-autoload-p (function file)
+  "Return non-nil when FUNCTION currently autoloads from FILE."
+  (equal (packlet--current-autoload-file function) file))
+
 (defun packlet--maybe-autoload (function file &optional interactive)
   "Autoload FUNCTION from FILE when it is not already defined.
-When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
-  (when (and (symbolp function)
-             (not (fboundp function)))
-    (packlet--maybe-load-autoloads file)
-    (unless (fboundp function)
-      (autoload function file nil interactive))))
+When INTERACTIVE is non-nil, register FUNCTION as an interactive command.
 
-(defvar packlet--autoloads-attempted (make-hash-table :test #'equal)
-  "Autoload libraries that `packlet' has already tried to load.")
+If FUNCTION is currently a fallback autoload from FILE, prefer package
+autoloads when they become available later in the session."
+  (when (symbolp function)
+    (when (or (not (fboundp function))
+              (packlet--fallback-autoload-p function file))
+      (packlet--maybe-load-autoloads file)
+      (when (or (not (fboundp function))
+                (packlet--fallback-autoload-p function file))
+        (autoload function file nil interactive)))))
+
+(defvar packlet--loaded-autoloads (make-hash-table :test #'equal)
+  "Autoload libraries that `packlet' has already loaded successfully.")
 
 (defun packlet--autoloads-file (file)
   "Return the autoload library name for FILE."
@@ -51,9 +67,10 @@ When INTERACTIVE is non-nil, register FUNCTION as an interactive command."
 (defun packlet--maybe-load-autoloads (file)
   "Load FILE's autoload definitions once when available."
   (let ((autoloads-file (packlet--autoloads-file file)))
-    (unless (gethash autoloads-file packlet--autoloads-attempted)
-      (puthash autoloads-file t packlet--autoloads-attempted)
-      (load autoloads-file t t))))
+    (unless (gethash autoloads-file packlet--loaded-autoloads)
+      (when (locate-library autoloads-file)
+        (when (load autoloads-file nil t)
+          (puthash autoloads-file t packlet--loaded-autoloads))))))
 
 (defun packlet--load-feature (feature &optional file)
   "Load FEATURE, falling back to FILE when needed."
