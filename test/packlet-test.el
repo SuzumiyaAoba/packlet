@@ -299,6 +299,75 @@
       (packlet-test--cleanup-feature feature)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-multiple-packlets-in-same-top-level-form-do-not-collide ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-shared-top-level))
+    (unwind-protect
+        (progn
+          (setq packlet-test-reeval-result nil)
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-shared-top-level-loaded t)")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name
+                  (expand-file-name "packlet-test-shared-top-level-config.el"
+                                    directory))
+            (insert "(progn\n\
+  (packlet packlet-test-shared-top-level\n\
+    :config\n\
+    (push 'a packlet-test-reeval-result))\n\
+  (packlet packlet-test-shared-top-level\n\
+    :config\n\
+    (push 'b packlet-test-reeval-result)))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (require feature)
+          (should (equal (sort (copy-sequence packlet-test-reeval-result)
+                               (lambda (left right)
+                                 (string-lessp (symbol-name left)
+                                               (symbol-name right))))
+                         '(a b))))
+      (setq packlet-test-reeval-result nil)
+      (packlet-test--cleanup-feature feature)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-config-reeval-after-form-move-does-not-leak-old-site ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-reeval-moved)
+         (source-file (expand-file-name "packlet-test-reeval-moved.el" directory)))
+    (unwind-protect
+        (progn
+          (setq packlet-test-reeval-result nil)
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-reeval-moved-loaded t)")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-reeval-moved\n\
+  :config\n\
+  (push 'old packlet-test-reeval-result))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (erase-buffer)
+            (insert "\n(packlet packlet-test-reeval-moved\n\
+  :config\n\
+  (push 'new packlet-test-reeval-result))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (require feature)
+          (should (equal packlet-test-reeval-result '(new))))
+      (setq packlet-test-reeval-result nil)
+      (packlet-test--cleanup-feature feature)
+      (delete-directory directory t))))
+
 (ert-deftest packlet-test-idle-keyword-registers-loader ()
   (let (calls)
     (cl-letf (((symbol-function 'packlet--register-idle-load)

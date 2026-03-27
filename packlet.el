@@ -281,45 +281,73 @@ Each PLIST may contain:
               Lisp forms to splice into the expansion.  CONTEXT is a
               plist with :feature, :file, :afters, and :sections.")
 
-  (defvar packlet--expansion-load-session nil
-    "Internal state for stable macro expansion ids while loading a file.")
-
-  (defvar packlet--expansion-load-counter 0
-    "Counter for `packlet' expansions in the current load session.")
+  (defvar packlet--expansion-load-states (make-hash-table :test #'equal)
+    "Expansion state for file-backed `packlet' macro calls.")
 
   (defun packlet--keyword-p (form)
     "Return non-nil when FORM is a supported `packlet' keyword."
     (or (memq form packlet--keywords)
         (assq form packlet--user-keywords)))
 
+  (defun packlet--generated-load-list-entry-p (entry)
+    "Return non-nil when ENTRY looks like a generated `packlet' helper."
+    (let ((symbol
+           (cond
+            ((symbolp entry) entry)
+            ((and (consp entry) (symbolp (cdr entry))) (cdr entry))
+            (t nil))))
+      (and symbol
+           (string-prefix-p "packlet--" (symbol-name symbol)))))
+
+  (defun packlet--initial-load-list-p (file load-list)
+    "Return non-nil when LOAD-LIST looks like the first expansion for FILE."
+    (and (member file load-list)
+         (not (cl-some #'packlet--generated-load-list-entry-p load-list))))
+
+  (defun packlet--current-buffer-tick-for-file (file)
+    "Return the current buffer modification tick when it is visiting FILE."
+    (when (and buffer-file-name
+               (equal (expand-file-name buffer-file-name) file))
+      (buffer-chars-modified-tick)))
+
   (defun packlet--next-load-expansion-index (file)
     "Return the next stable expansion index for FILE in the current load session."
-    (if (and packlet--expansion-load-session
-             (equal (car packlet--expansion-load-session) file)
-             (eq (cdr packlet--expansion-load-session) current-load-list))
-        (cl-incf packlet--expansion-load-counter)
-      (setq packlet--expansion-load-session (cons file current-load-list)
-            packlet--expansion-load-counter 1)))
+    (let* ((state (gethash file packlet--expansion-load-states))
+           (last-counter (plist-get state :counter))
+           (last-point (plist-get state :point))
+           (last-load-list (plist-get state :load-list))
+           (last-buffer-tick (plist-get state :buffer-tick))
+           (current-point (point))
+           (current-buffer-tick (packlet--current-buffer-tick-for-file file))
+           (reset
+            (or (null state)
+                (not (equal current-buffer-tick last-buffer-tick))
+                (and last-point
+                     (< current-point last-point))
+                (and (packlet--initial-load-list-p file current-load-list)
+                     (not (eq current-load-list last-load-list)))))
+           (counter (if reset
+                        1
+                      (1+ (or last-counter 0)))))
+      ;; The first expansion in a fresh `eval-buffer'/`load-file' pass
+      ;; starts with a clean load list object, while later expansions in
+      ;; the same pass already reference generated `packlet--...' helpers.
+      ;; Combining that signal with point/tick tracking keeps repeated
+      ;; evals stable without collapsing multiple packlets in one form.
+      (puthash file
+               (list :counter counter
+                     :point current-point
+                     :load-list current-load-list
+                     :buffer-tick current-buffer-tick)
+               packlet--expansion-load-states)
+      counter))
 
   (defun packlet--expansion-site (feature body)
     "Return a stable site identifier for FEATURE with BODY."
     (let* ((file (or (macroexp-file-name)
                      buffer-file-name))
-           (expanded-file (and file (expand-file-name file)))
-           (buffer-site
-            (and buffer-file-name
-                 expanded-file
-                 (equal (expand-file-name buffer-file-name) expanded-file)
-                 (save-excursion
-                   (condition-case nil
-                       (progn
-                         (beginning-of-defun)
-                         (list 'buffer expanded-file
-                               (line-number-at-pos)
-                               (point)))
-                     (error nil))))))
-      (or buffer-site
-          (and expanded-file
+           (expanded-file (and file (expand-file-name file))))
+      (or (and expanded-file
                (list 'load expanded-file
                      (packlet--next-load-expansion-index expanded-file)))
           (list 'eval
