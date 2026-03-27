@@ -11,6 +11,7 @@ It focuses on the common parts of package configuration:
 - deferring configuration until a feature is actually loaded
 - warming up a feature after startup during idle time
 - optionally demanding a feature once its dependencies are ready
+- re-evaluating `packlet` forms without stacking duplicate config or hook handlers
 - declaring external functions and variables for byte compilation
 
 It does not install packages by itself. `packlet` only describes when and how
@@ -68,6 +69,9 @@ Clone this repository and add it to `load-path`:
   Forms evaluated immediately.
 - `:custom`
   `(variable value)` forms applied immediately with `setopt`.
+- `:load`
+  Load helper libraries immediately. If a library cannot be found, `packlet`
+  emits a warning.
 - `:config`
   Forms evaluated once after the feature and every `:after` dependency are
   loaded.
@@ -93,10 +97,12 @@ Clone this repository and add it to `load-path`:
   Require the feature after startup on the next idle period. With no value,
   this defaults to `1.0`. A numeric value changes the idle delay in seconds.
   If the minibuffer is active or input is pending, `packlet` retries on a
-  later idle period instead of loading immediately.
+  later idle period instead of loading immediately. Missing libraries emit a
+  warning when the idle load runs.
 - `:demand`
   Require the feature once its `:after` dependencies are satisfied. With no
-  value, this defaults to `t`. You can also pass a condition form.
+  value, this defaults to `t`. You can also pass a condition form. Missing
+  libraries emit a warning.
 - `:functions`
   Function symbols declared with `declare-function` for byte compilation.
 - `:defines`

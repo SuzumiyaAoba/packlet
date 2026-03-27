@@ -20,6 +20,8 @@
 (defvar packlet-test-compile-function-ran)
 (defvar packlet-test-compile-config-ran)
 (defvar packlet-test-compile-second-config-ran)
+(defvar packlet-test-reeval-result)
+(defvar packlet-test-hook-count)
 
 (declare-function packlet-test-hook "packlet-test-feature" ())
 (declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
@@ -237,18 +239,78 @@
       (packlet-test--cleanup-feature 'packlet-test-shared-config)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-config-reeval-does-not-duplicate ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-reeval-config))
+    (unwind-protect
+        (progn
+          (setq packlet-test-reeval-result nil)
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-reeval-config-loaded t)")
+          (eval
+           '(packlet packlet-test-reeval-config
+              :config
+              (push 'ran packlet-test-reeval-result)))
+          (eval
+           '(packlet packlet-test-reeval-config
+              :config
+              (push 'ran packlet-test-reeval-result)))
+          (should-not packlet-test-reeval-result)
+          (require feature)
+          (should (equal packlet-test-reeval-result '(ran))))
+      (setq packlet-test-reeval-result nil)
+      (packlet-test--cleanup-feature feature)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-config-reeval-updates-same-site ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-reeval-buffer)
+         (source-file (expand-file-name "packlet-test-reeval-buffer.el" directory)))
+    (unwind-protect
+        (progn
+          (setq packlet-test-reeval-result nil)
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-reeval-buffer-loaded t)")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-reeval-buffer\n\
+  :config\n\
+  (push 'old packlet-test-reeval-result))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (erase-buffer)
+            (insert "(packlet packlet-test-reeval-buffer\n\
+  :config\n\
+  (push 'new packlet-test-reeval-result))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (require feature)
+          (should (equal packlet-test-reeval-result '(new))))
+      (setq packlet-test-reeval-result nil)
+      (packlet-test--cleanup-feature feature)
+      (delete-directory directory t))))
+
 (ert-deftest packlet-test-idle-keyword-registers-loader ()
   (let (calls)
     (cl-letf (((symbol-function 'packlet--register-idle-load)
-               (lambda (feature afters file delay)
-                 (push (list feature afters file delay) calls))))
+               (lambda (id feature afters file delay)
+                 (push (list id feature afters file delay) calls))))
       (packlet packlet-test-idle-default
         :idle)
       (packlet packlet-test-idle-delayed
         :after packlet-test-after
         :idle 2.5))
     (should
-     (equal (nreverse calls)
+     (equal (mapcar #'cdr (nreverse calls))
             '((packlet-test-idle-default nil "packlet-test-idle-default" 1.0)
               (packlet-test-idle-delayed
                (packlet-test-after)
@@ -279,7 +341,12 @@
                (lambda (_feature _file)
                  (setq load-count (1+ load-count))
                  t)))
-      (packlet--register-idle-load 'packlet-test-idle nil "packlet-test-idle" 2.5)
+      (packlet--register-idle-load
+       'packlet-test-idle-loader
+       'packlet-test-idle
+       nil
+       "packlet-test-idle"
+       2.5)
       (should-not scheduled)
       (run-hooks 'emacs-startup-hook)
       (should (= (length scheduled) 1))
@@ -313,7 +380,12 @@
                (lambda (_feature _file)
                  (setq load-count (1+ load-count))
                  t)))
-      (packlet--register-idle-load 'packlet-test-idle nil "packlet-test-idle" 1.0)
+          (packlet--register-idle-load
+           'packlet-test-idle-loader
+           'packlet-test-idle
+           nil
+           "packlet-test-idle"
+           1.0)
       (should (= (length scheduled) 1))
       (packlet-test--invoke-scheduled-timer (car scheduled))
       (should (= load-count 0))
@@ -351,6 +423,7 @@
            'packlet-test-idle-after
            "(defvar packlet-test-idle-after-loaded t)")
           (packlet--register-idle-load
+           'packlet-test-idle-loader
            'packlet-test-idle
            '(packlet-test-idle-after)
            "packlet-test-idle"
@@ -689,6 +762,30 @@
         (makunbound 'packlet-test-loaded-marker))
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-load-keyword-warns-when-library-missing ()
+  (let (warnings)
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &optional _level)
+                 (push message warnings))))
+      (packlet packlet-test-missing-load
+        :load "packlet-test-missing-library"))
+    (should (= (length warnings) 1))
+    (should (string-match-p
+             "packlet-test-missing-library"
+             (car warnings)))))
+
+(ert-deftest packlet-test-demand-keyword-warns-when-library-missing ()
+  (let (warnings)
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &optional _level)
+                 (push message warnings))))
+      (packlet packlet-test-missing-demand
+        :demand t))
+    (should (= (length warnings) 1))
+    (should (string-match-p
+             "packlet-test-missing-demand"
+             (car warnings)))))
+
 (ert-deftest packlet-test-after-load-keyword ()
   (let* ((directory (make-temp-file "packlet-test-" t))
          (load-path (cons directory load-path))
@@ -733,6 +830,26 @@
                          '((packlet-test-user-kw-feature . "alpha")
                            (packlet-test-user-kw-feature . "beta")))))
       (setq packlet-test-user-kw-result nil))))
+
+(ert-deftest packlet-test-user-keywords-follow-section-order ()
+  (defvar packlet-test-user-kw-order nil)
+  (let ((packlet--user-keywords nil))
+    (unwind-protect
+        (progn
+          (setq packlet-test-user-kw-order nil)
+          (packlet-define-keyword :packlet-b
+            :expand (lambda (_ctx _forms)
+                      '((push :b packlet-test-user-kw-order))))
+          (packlet-define-keyword :packlet-a
+            :expand (lambda (_ctx _forms)
+                      '((push :a packlet-test-user-kw-order))))
+          (eval
+           '(packlet packlet-test-user-kw-order-feature
+              :packlet-a first
+              :packlet-b second))
+          (should (equal (nreverse packlet-test-user-kw-order)
+                         '(:a :b))))
+      (setq packlet-test-user-kw-order nil))))
 
 (ert-deftest packlet-test-user-keyword-rejects-builtin ()
   (should-error (packlet-define-keyword :init
@@ -818,6 +935,69 @@
           (should (= (length cancelled) 1))
           (should (= (length scheduled) 2)))
       (packlet-test--cleanup-symbols '(packlet-test-debounce-hook)))))
+
+(ert-deftest packlet-test-hook-reeval-does-not-duplicate ()
+  (defvar packlet-test-reeval-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-count 0
+              packlet-test-reeval-hook nil)
+        (eval
+         '(packlet packlet-test-reeval-hook-feature
+            :hook ((packlet-test-reeval-hook
+                    . (lambda ()
+                        (setq packlet-test-hook-count
+                              (1+ packlet-test-hook-count)))))))
+        (eval
+         '(packlet packlet-test-reeval-hook-feature
+            :hook ((packlet-test-reeval-hook
+                    . (lambda ()
+                        (setq packlet-test-hook-count
+                              (1+ packlet-test-hook-count)))))))
+        (run-hooks 'packlet-test-reeval-hook)
+        (should (= packlet-test-hook-count 1)))
+    (setq packlet-test-hook-count nil)
+    (packlet-test--cleanup-symbols '(packlet-test-reeval-hook))))
+
+(ert-deftest packlet-test-delayed-hook-reeval-does-not-duplicate ()
+  (let* ((scheduled nil)
+         (timer-id 0))
+    (defvar packlet-test-delayed-reeval-hook nil)
+    (unwind-protect
+        (progn
+          (setq packlet-test-hook-count 0
+                packlet-test-delayed-reeval-hook nil)
+          (cl-letf (((symbol-function 'run-with-idle-timer)
+                     (lambda (secs repeat fn &rest args)
+                       (let ((timer (list :timer (cl-incf timer-id))))
+                         (push (list :timer timer :secs secs :repeat repeat
+                                     :fn fn :args args)
+                               scheduled)
+                         timer)))
+                    ((symbol-function 'timerp)
+                     (lambda (object)
+                       (and (consp object)
+                            (eq (car object) :timer)))))
+            (eval
+             '(packlet packlet-test-delayed-reeval-feature
+                :hook ((packlet-test-delayed-reeval-hook
+                        (lambda ()
+                          (setq packlet-test-hook-count
+                                (1+ packlet-test-hook-count)))
+                        0.5))))
+            (eval
+             '(packlet packlet-test-delayed-reeval-feature
+                :hook ((packlet-test-delayed-reeval-hook
+                        (lambda ()
+                          (setq packlet-test-hook-count
+                                (1+ packlet-test-hook-count)))
+                        0.5))))
+            (run-hooks 'packlet-test-delayed-reeval-hook)
+            (should (= (length scheduled) 1))
+            (packlet-test--invoke-scheduled-timer (car scheduled))
+            (should (= packlet-test-hook-count 1))))
+      (setq packlet-test-hook-count nil)
+      (packlet-test--cleanup-symbols '(packlet-test-delayed-reeval-hook)))))
 
 (ert-deftest packlet-test-delayed-hook-rejects-negative-delay ()
   (should-error

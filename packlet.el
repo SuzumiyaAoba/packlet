@@ -27,6 +27,18 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(eval-and-compile
+  (require 'macroexp))
+
+(defgroup packlet nil
+  "Lazy-first package setup DSL."
+  :group 'lisp
+  :prefix "packlet-")
+
+(defcustom packlet-warn-on-missing-libraries t
+  "Whether `packlet' should warn when an explicit library load fails."
+  :type 'boolean
+  :group 'packlet)
 
 (defun packlet--all-features-loaded-p (features)
   "Return non-nil when every feature in FEATURES is loaded."
@@ -60,6 +72,32 @@ autoloads when they become available later in the session."
 (defvar packlet--loaded-autoloads (make-hash-table :test #'equal)
   "Autoload libraries that `packlet' has already loaded successfully.")
 
+(defvar packlet--after-load-handlers (make-hash-table :test #'eq)
+  "Registered after-load handlers keyed by watched feature.")
+
+(defvar packlet--after-load-dispatchers (make-hash-table :test #'eq)
+  "Features whose after-load dispatcher is already installed.")
+
+(cl-defstruct (packlet--idle-state
+               (:constructor packlet--make-idle-state))
+  feature
+  afters
+  file
+  delay
+  startup-complete
+  timer
+  startup-hook)
+
+(defvar packlet--idle-load-states (make-hash-table :test #'equal)
+  "State for `:idle' loaders keyed by packlet expansion id.")
+
+(defun packlet--warn (format-string &rest args)
+  "Emit a `packlet' warning using FORMAT-STRING and ARGS."
+  (when packlet-warn-on-missing-libraries
+    (display-warning 'packlet
+                     (apply #'format format-string args)
+                     :warning)))
+
 (defun packlet--autoloads-file (file)
   "Return the autoload library name for FILE."
   (format "%s-autoloads" file))
@@ -72,32 +110,64 @@ autoloads when they become available later in the session."
         (when (load autoloads-file nil t)
           (puthash autoloads-file t packlet--loaded-autoloads))))))
 
+(defun packlet--load-library (file)
+  "Load FILE and warn when it cannot be found."
+  (or (load file t 'nomessage)
+      (prog1 nil
+        (packlet--warn "Could not load library `%s'" file))))
+
 (defun packlet--load-feature (feature &optional file)
   "Load FEATURE, falling back to FILE when needed."
   (or (require feature nil t)
-      (when file
-        (load file nil t))))
+      (if file
+          (packlet--load-library file)
+        (prog1 nil
+          (packlet--warn "Could not require feature `%s'" feature)))))
 
-(defun packlet--register-after-load (feature function afters)
-  "Run FUNCTION after FEATURE and AFTERS are loaded."
-  (with-eval-after-load feature
-    (funcall function))
+(defun packlet--after-load-handler-table (feature)
+  "Return the handler table for watched FEATURE."
+  (or (gethash feature packlet--after-load-handlers)
+      (let ((table (make-hash-table :test #'equal)))
+        (puthash feature table packlet--after-load-handlers)
+        table)))
+
+(defun packlet--run-after-load-handlers (feature)
+  "Run registered handlers for watched FEATURE."
+  (when-let ((table (gethash feature packlet--after-load-handlers)))
+    (maphash
+     (lambda (_id function)
+       (funcall function))
+     table)))
+
+(defun packlet--register-after-load-handler (feature id function)
+  "Register FUNCTION under ID for watched FEATURE."
+  (puthash id function (packlet--after-load-handler-table feature))
+  (unless (gethash feature packlet--after-load-dispatchers)
+    (puthash feature t packlet--after-load-dispatchers)
+    (with-eval-after-load feature
+      (packlet--run-after-load-handlers feature)))
+  (when (featurep feature)
+    (funcall function)))
+
+(defun packlet--register-after-load (id feature function afters)
+  "Run FUNCTION after FEATURE and AFTERS are loaded.
+ID identifies the current `packlet' expansion."
+  (packlet--register-after-load-handler feature (list id feature) function)
   (dolist (after afters)
-    (with-eval-after-load after
-      (funcall function)))
+    (packlet--register-after-load-handler after (list id after) function))
   (funcall function))
 
-(defun packlet--register-demand-load (feature afters &optional file)
+(defun packlet--register-demand-load (id feature afters &optional file)
   "Load FEATURE once AFTERS are loaded.
-When FILE is non-nil, use it as a fallback library name."
+When FILE is non-nil, use it as a fallback library name.
+ID identifies the current `packlet' expansion."
   (let ((load-now
          (lambda ()
            (when (and (not (featurep feature))
                       (packlet--all-features-loaded-p afters))
              (packlet--load-feature feature file)))))
     (dolist (after afters)
-      (with-eval-after-load after
-        (funcall load-now)))
+      (packlet--register-after-load-handler after (list id after) load-now))
     (funcall load-now)))
 
 (defun packlet--idle-load-ready-p ()
@@ -106,43 +176,75 @@ When FILE is non-nil, use it as a fallback library name."
        (not (active-minibuffer-window))
        (not executing-kbd-macro)))
 
-(defun packlet--register-idle-load (feature afters &optional file delay)
+(defun packlet--cancel-idle-load-timer (state)
+  "Cancel the active timer in idle loader STATE."
+  (when (timerp (packlet--idle-state-timer state))
+    (cancel-timer (packlet--idle-state-timer state)))
+  (setf (packlet--idle-state-timer state) nil))
+
+(defun packlet--idle-load-schedulable-p (state)
+  "Return non-nil when idle loader STATE can schedule a load."
+  (and (packlet--idle-state-startup-complete state)
+       (not (featurep (packlet--idle-state-feature state)))
+       (packlet--all-features-loaded-p (packlet--idle-state-afters state))))
+
+(defun packlet--run-idle-load (id)
+  "Run the idle loader registered under ID."
+  (when-let ((state (gethash id packlet--idle-load-states)))
+    (setf (packlet--idle-state-timer state) nil)
+    (when (packlet--idle-load-schedulable-p state)
+      (if (packlet--idle-load-ready-p)
+          (packlet--load-feature (packlet--idle-state-feature state)
+                                 (packlet--idle-state-file state))
+        (packlet--maybe-schedule-idle-load id)))))
+
+(defun packlet--maybe-schedule-idle-load (id)
+  "Schedule the idle loader registered under ID when ready."
+  (when-let ((state (gethash id packlet--idle-load-states)))
+    (when (and (packlet--idle-load-schedulable-p state)
+               (not (timerp (packlet--idle-state-timer state))))
+      (setf (packlet--idle-state-timer state)
+            (run-with-idle-timer
+             (packlet--idle-state-delay state) nil
+             #'packlet--run-idle-load
+             id)))))
+
+(defun packlet--register-idle-load (id feature afters &optional file delay)
   "Load FEATURE after startup during idle time.
 AFTERS must be loaded before scheduling begins.  When FILE is non-nil,
-use it as a fallback library name.  DELAY is the idle duration in seconds."
-  (let ((delay (or delay 1.0))
-        (startup-complete after-init-time)
-        timer
-        startup-hook-fn
-        maybe-schedule)
-    (setq maybe-schedule
-          (lambda ()
-            (when (and startup-complete
-                       (not (featurep feature))
-                       (packlet--all-features-loaded-p afters)
-                       (not (timerp timer)))
-              (setq timer
-                    (run-with-idle-timer
-                     delay nil
-                     (lambda ()
-                       (setq timer nil)
-                       (when (and startup-complete
-                                  (not (featurep feature))
-                                  (packlet--all-features-loaded-p afters))
-                         (if (packlet--idle-load-ready-p)
-                             (packlet--load-feature feature file)
-                           (funcall maybe-schedule)))))))))
-    (unless startup-complete
-      (setq startup-hook-fn
-            (lambda ()
-              (setq startup-complete t)
-              (remove-hook 'emacs-startup-hook startup-hook-fn)
-              (funcall maybe-schedule)))
-      (add-hook 'emacs-startup-hook startup-hook-fn))
+use it as a fallback library name.  DELAY is the idle duration in seconds.
+ID identifies the current `packlet' expansion."
+  (let ((state (or (gethash id packlet--idle-load-states)
+                   (puthash id (packlet--make-idle-state)
+                            packlet--idle-load-states))))
+    (packlet--cancel-idle-load-timer state)
+    (when-let ((startup-hook (packlet--idle-state-startup-hook state)))
+      (remove-hook 'emacs-startup-hook startup-hook)
+      (setf (packlet--idle-state-startup-hook state) nil))
+    (setf (packlet--idle-state-feature state) feature
+          (packlet--idle-state-afters state) afters
+          (packlet--idle-state-file state) file
+          (packlet--idle-state-delay state) (or delay 1.0)
+          (packlet--idle-state-startup-complete state) after-init-time)
+    (unless (packlet--idle-state-startup-complete state)
+      (let ((startup-hook
+             (lambda ()
+               (when-let ((idle-state (gethash id packlet--idle-load-states)))
+                 (setf (packlet--idle-state-startup-complete idle-state) t)
+                 (when-let ((registered-hook
+                             (packlet--idle-state-startup-hook idle-state)))
+                   (remove-hook 'emacs-startup-hook registered-hook)
+                   (setf (packlet--idle-state-startup-hook idle-state) nil))
+                 (packlet--maybe-schedule-idle-load id)))))
+        (setf (packlet--idle-state-startup-hook state) startup-hook)
+        (add-hook 'emacs-startup-hook startup-hook)))
     (dolist (after afters)
-      (with-eval-after-load after
-        (funcall maybe-schedule)))
-    (funcall maybe-schedule)))
+      (packlet--register-after-load-handler
+       after
+       (list id after)
+       (lambda ()
+         (packlet--maybe-schedule-idle-load id))))
+    (packlet--maybe-schedule-idle-load id)))
 
 (defun packlet--resolve-keymap (keymap)
   "Return the keymap named by KEYMAP, or nil when it is not yet bound."
@@ -152,18 +254,17 @@ use it as a fallback library name.  DELAY is the idle duration in seconds."
         (error "packlet: %S does not name a keymap" keymap))
       value)))
 
-(defun packlet--register-keymap-binding (feature keymap key command afters)
+(defun packlet--register-keymap-binding (id feature keymap key command afters)
   "Bind KEY to COMMAND in KEYMAP when the map becomes available.
-FEATURE and AFTERS are watched for opportunities to install the binding."
+FEATURE and AFTERS are watched for opportunities to install the binding.
+ID identifies the current `packlet' expansion."
   (let ((install
          (lambda ()
            (when-let ((map (packlet--resolve-keymap keymap)))
              (define-key map key command)))))
-    (with-eval-after-load feature
-      (funcall install))
+    (packlet--register-after-load-handler feature (list id feature) install)
     (dolist (after afters)
-      (with-eval-after-load after
-        (funcall install)))
+      (packlet--register-after-load-handler after (list id after) install))
     (funcall install)))
 
 (eval-and-compile
@@ -180,20 +281,61 @@ Each PLIST may contain:
               Lisp forms to splice into the expansion.  CONTEXT is a
               plist with :feature, :file, :afters, and :sections.")
 
-  (defvar packlet--generated-symbol-counter 0
-    "Counter for generating unique helper symbols during macro expansion.")
+  (defvar packlet--expansion-load-session nil
+    "Internal state for stable macro expansion ids while loading a file.")
+
+  (defvar packlet--expansion-load-counter 0
+    "Counter for `packlet' expansions in the current load session.")
 
   (defun packlet--keyword-p (form)
     "Return non-nil when FORM is a supported `packlet' keyword."
     (or (memq form packlet--keywords)
         (assq form packlet--user-keywords)))
 
-  (defun packlet--generated-symbol (prefix feature)
-    "Return an interned helper symbol for PREFIX and FEATURE."
-    (intern (format "%s-%s-%d"
-                    prefix
-                    (symbol-name feature)
-                    (cl-incf packlet--generated-symbol-counter))))
+  (defun packlet--next-load-expansion-index (file)
+    "Return the next stable expansion index for FILE in the current load session."
+    (if (and packlet--expansion-load-session
+             (equal (car packlet--expansion-load-session) file)
+             (eq (cdr packlet--expansion-load-session) current-load-list))
+        (cl-incf packlet--expansion-load-counter)
+      (setq packlet--expansion-load-session (cons file current-load-list)
+            packlet--expansion-load-counter 1)))
+
+  (defun packlet--expansion-site (feature body)
+    "Return a stable site identifier for FEATURE with BODY."
+    (let* ((file (or (macroexp-file-name)
+                     buffer-file-name))
+           (expanded-file (and file (expand-file-name file)))
+           (buffer-site
+            (and buffer-file-name
+                 expanded-file
+                 (equal (expand-file-name buffer-file-name) expanded-file)
+                 (save-excursion
+                   (condition-case nil
+                       (progn
+                         (beginning-of-defun)
+                         (list 'buffer expanded-file
+                               (line-number-at-pos)
+                               (point)))
+                     (error nil))))))
+      (or buffer-site
+          (and expanded-file
+               (list 'load expanded-file
+                     (packlet--next-load-expansion-index expanded-file)))
+          (list 'eval
+                (buffer-name (current-buffer))
+                feature
+                (sxhash-equal body)))))
+
+  (defun packlet--generated-symbol (prefix feature site &optional suffix)
+    "Return an interned helper symbol for PREFIX, FEATURE, SITE, and SUFFIX."
+    (let ((hash (logand most-positive-fixnum
+                        (sxhash-equal (list prefix feature site suffix)))))
+      (intern (format "%s-%s-%s-%x"
+                      prefix
+                      (symbol-name feature)
+                      (or suffix "main")
+                      hash))))
 
   (defun packlet--proper-list-p (value)
     "Return non-nil when VALUE is a proper list."
@@ -289,9 +431,6 @@ DELAY must be a non-negative number."
          (numberp (caddr value))
          (>= (caddr value) 0)
          (null (cdddr value))))
-
-  (defvar packlet--delayed-hook-counter 0
-    "Counter for generating unique delayed-hook timer variables.")
 
   (defun packlet--bind-entry-p (value)
     "Return non-nil when VALUE is a valid `:bind' entry."
@@ -513,18 +652,17 @@ An entry is (FEATURE BODY...) where FEATURE is a symbol."
     "Expand user-defined keywords found in SECTIONS.
 FEATURE, FILE, and AFTERS provide the packlet context."
     (let (forms)
-      (dolist (entry packlet--user-keywords)
-        (let* ((kw (car entry))
-               (props (cdr entry))
-               (raw (packlet--section sections kw)))
-          (when raw
-            (let* ((normalizer (plist-get props :normalize))
-                   (expander (plist-get props :expand))
-                   (normalized (if normalizer (funcall normalizer raw) raw))
-                   (context (list :feature feature :file file
-                                  :afters afters :sections sections)))
-              (when expander
-                (setq forms (append forms (funcall expander context normalized))))))))
+      (dolist (section sections)
+        (when-let ((entry (assq (car section) packlet--user-keywords)))
+          (let* ((props (cdr entry))
+                 (raw (cdr section))
+                 (normalizer (plist-get props :normalize))
+                 (expander (plist-get props :expand))
+                 (normalized (if normalizer (funcall normalizer raw) raw))
+                 (context (list :feature feature :file file
+                                :afters afters :sections sections)))
+            (when expander
+              (setq forms (append forms (funcall expander context normalized)))))))
       forms)))
 
 ;;;###autoload
@@ -567,6 +705,7 @@ Example:
   (unless (symbolp feature)
     (error "packlet: FEATURE must be a symbol"))
   (let* ((sections (packlet--parse-body body))
+         (site (packlet--expansion-site feature body))
          (init-forms (packlet--section sections :init))
          (setq-forms (packlet--normalize-customs
                       (packlet--section sections :setq)))
@@ -604,10 +743,14 @@ Example:
          (file (packlet--file-form sections feature))
          (configured-var (packlet--generated-symbol
                           "packlet--configured"
-                          feature))
+                          feature
+                          site
+                          "config"))
          (config-function (packlet--generated-symbol
                            "packlet--configure"
-                           feature))
+                           feature
+                           site
+                           "config"))
          (user-forms (packlet--expand-user-keywords sections feature file afters)))
     `(progn
        ,@(mapcar
@@ -628,7 +771,7 @@ Example:
           custom-forms)
        ,@(mapcar
           (lambda (lib)
-            `(load ,lib t 'nomessage))
+            `(packlet--load-library ,lib))
           load-libs)
        ,@init-forms
        ,@(mapcar
@@ -648,36 +791,57 @@ Example:
                (packlet--maybe-autoload ',(cdr mode) ,file t)
                (add-to-list 'auto-mode-alist ',mode)))
           modes)
-       ,@(cl-mapcan
-          (lambda (hook)
+       ,@(cl-loop
+          for hook in hooks
+          for index from 0
+          append
+          (let* ((hook-var (car hook))
+                 (function (if (packlet--delayed-hook-entry-p hook)
+                               (cadr hook)
+                             (cdr hook)))
+                 (hook-function
+                  (packlet--generated-symbol
+                   "packlet--hook"
+                   feature
+                   site
+                   (format "hook-%d" index))))
             (if (packlet--delayed-hook-entry-p hook)
-                (let* ((hook-var (car hook))
-                       (function (cadr hook))
-                       (delay (caddr hook))
-                       (timer-var (intern (format "packlet--delayed-hook-timer-%s-%d"
-                                                  feature
-                                                  (cl-incf packlet--delayed-hook-counter)))))
+                (let ((delay (caddr hook))
+                      (timer-var
+                       (packlet--generated-symbol
+                        "packlet--delayed-hook-timer"
+                        feature
+                        site
+                        (format "hook-%d" index))))
                   `((defvar ,timer-var nil)
                     ,@(when (symbolp function)
                         `((packlet--maybe-autoload ',function ,file nil)))
-                    (add-hook ',hook-var
-                              (lambda ()
-                                (when (timerp ,timer-var)
-                                  (cancel-timer ,timer-var))
-                                (setq ,timer-var
-                                      (run-with-idle-timer
-                                       ,delay nil
-                                       (lambda ()
-                                         (setq ,timer-var nil)
-                                         (funcall ,(packlet--hook-function-form function)))))))))
+                    (when (timerp ,timer-var)
+                      (cancel-timer ,timer-var)
+                      (setq ,timer-var nil))
+                    (defalias ',hook-function
+                      (lambda ()
+                        (when (timerp ,timer-var)
+                          (cancel-timer ,timer-var))
+                        (setq ,timer-var
+                              (run-with-idle-timer
+                               ,delay nil
+                               (lambda ()
+                                 (setq ,timer-var nil)
+                                 (funcall ,(packlet--hook-function-form function)))))))
+                    (add-hook ',hook-var ',hook-function)))
               `((progn
-                  ,(when (symbolp (cdr hook))
-                     `(packlet--maybe-autoload ',(cdr hook) ,file nil))
-                  (add-hook ',(car hook)
-                            ,(packlet--hook-function-form (cdr hook)))))))
-          hooks)
-       ,@(mapcar
-          (lambda (binding)
+                  ,@(when (symbolp function)
+                      `((packlet--maybe-autoload ',function ,file nil)))
+                  (defalias ',hook-function
+                    (lambda ()
+                      (funcall ,(packlet--hook-function-form function))))
+                  (add-hook ',hook-var ',hook-function))))))
+       ,@(cl-loop
+          for binding in bindings
+          for index from 0
+          collect
+          (let ((binding-id (list site :bind index)))
             (pcase binding
               (`(:global ,key ,command)
                `(progn
@@ -689,23 +853,43 @@ Example:
                `(progn
                   (packlet--maybe-autoload ',command ,file t)
                   (packlet--register-keymap-binding
+                   ',binding-id
                    ',feature
                    ',keymap
                    ,(packlet--key-form key)
-                  ',command
-                   ',afters)))))
-          bindings)
-       ,@(mapcar
-          (lambda (entry)
-            `(with-eval-after-load ',(car entry)
-               ,@(cdr entry)))
-          after-loads)
+                   ',command
+                   ',afters))))))
+       ,@(cl-loop
+          for entry in after-loads
+          for index from 0
+          collect
+          (let ((after-load-function
+                 (packlet--generated-symbol
+                  "packlet--after-load"
+                  feature
+                  site
+                  (format "after-load-%d" index)))
+                (after-load-id (list site :after-load index)))
+            `(progn
+               (defalias ',after-load-function
+                 (lambda ()
+                   ,@(cdr entry)))
+               (packlet--register-after-load-handler
+                ',(car entry)
+                ',after-load-id
+                ',after-load-function))))
        ,@user-forms
        ,@(when (packlet--has-section-p sections :idle)
            `((when-let ((delay (packlet--idle-delay ,idle-form)))
-               (packlet--register-idle-load ',feature ',afters ,file delay))))
+               (packlet--register-idle-load
+                ',(list site :idle)
+                ',feature
+                ',afters
+                ,file
+                delay))))
        ,@(when config-forms
            `((defvar ,configured-var nil)
+             (setq ,configured-var nil)
              (defalias ',config-function
                (lambda ()
                  (when (and (not ,configured-var)
@@ -714,12 +898,17 @@ Example:
                    (setq ,configured-var t)
                    ,@config-forms)))
              (packlet--register-after-load
+              ',(list site :config)
               ',feature
               ',config-function
               ',afters)))
        ,@(when (packlet--has-section-p sections :demand)
            `((when ,demand-form
-               (packlet--register-demand-load ',feature ',afters ,file)))))))
+               (packlet--register-demand-load
+                ',(list site :demand)
+                ',feature
+                ',afters
+                ,file)))))))
 
 (provide 'packlet)
 
