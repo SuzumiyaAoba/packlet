@@ -15,6 +15,7 @@
 (defvar packlet-test-command-ran)
 (defvar packlet-test-hook-ran)
 (defvar packlet-test-helper-ran)
+(defvar packlet-test-interpreter-ran)
 (defvar packlet-test-prefix-command-ran)
 (defvar packlet-test-prefix-map-command-ran)
 (defvar packlet-test-parent-map)
@@ -267,6 +268,65 @@
           (global-set-key key old-binding)
         (global-unset-key key))
       (delete-directory directory t))))
+
+(ert-deftest packlet-test-interpreter-autoload-and-registration ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (interpreter-mode-alist interpreter-mode-alist)
+         (feature 'packlet-test-interpreter-feature)
+         (symbols '(packlet-test-script-mode
+                    packlet-test-interpreter-ran)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols symbols)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-interpreter-ran nil)\n\
+(defun packlet-test-script-mode ()\n\
+  (interactive)\n\
+  (setq packlet-test-interpreter-ran t)\n\
+  (setq major-mode 'packlet-test-script-mode))")
+          (packlet packlet-test-interpreter-feature
+            :interpreter ("packlet-test-script" . packlet-test-script-mode))
+          (should (autoloadp (symbol-function 'packlet-test-script-mode)))
+          (should (equal (assoc "packlet-test-script" interpreter-mode-alist)
+                         '("packlet-test-script" . packlet-test-script-mode)))
+          (with-temp-buffer
+            (setq buffer-file-name (expand-file-name "script" directory))
+            (insert "#!/usr/bin/env packlet-test-script\n")
+            (set-auto-mode)
+            (should (eq major-mode 'packlet-test-script-mode))
+            (should (bound-and-true-p packlet-test-interpreter-ran))))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols symbols)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-interpreter-reeval-after-removal-clears-old-entry ()
+  (let ((source-file (make-temp-file "packlet-test-interpreter-remove-" nil ".el"))
+        (interpreter-mode-alist interpreter-mode-alist))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-symbols '(packlet-test-interpreter-remove-mode))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-interpreter-remove-feature\n\
+  :interpreter (\"packlet-test-remove\" . packlet-test-interpreter-remove-mode))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (should (equal (assoc "packlet-test-remove" interpreter-mode-alist)
+                           '("packlet-test-remove"
+                             . packlet-test-interpreter-remove-mode)))
+            (erase-buffer)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should-not (assoc "packlet-test-remove" interpreter-mode-alist)))
+      (packlet-test--cleanup-symbols '(packlet-test-interpreter-remove-mode))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
 
 (ert-deftest packlet-test-multiple-hooks-register-and-run ()
   (let* ((directory (make-temp-file "packlet-test-" t))
@@ -639,6 +699,34 @@
         (kill-buffer buffer))
       (setq packlet-test-hook-count nil)
       (packlet-test--cleanup-symbols '(packlet-test-buffer-scope-hook)))))
+
+(ert-deftest packlet-test-describe-source-file-scope ()
+  (let ((source-file (make-temp-file "packlet-test-describe-" nil ".el")))
+    (defvar packlet-test-describe-hook nil)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-describe-feature\n\
+  :setq (packlet-test-tracked-setq 7)\n\
+  :hook ((packlet-test-describe-hook . ignore)))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (let ((description (packlet-describe-source source-file)))
+            (should (string-match-p (regexp-quote source-file) description))
+            (should (string-match-p ":setq" description))
+            (should (string-match-p ":hook" description))))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
+      (packlet-test--cleanup-symbols '(packlet-test-describe-hook))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
 
 (ert-deftest packlet-test-deep-nonfile-eval-detects-packlet ()
   (defvar packlet-test-deep-eval-hook nil)

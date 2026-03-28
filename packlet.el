@@ -146,6 +146,16 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
                        buffer))))
       (packlet--normalize-source-scope (list :buffer scope-buffer)))))
 
+(defun packlet--buffer-source-scope (&optional buffer)
+  "Return the preferred `packlet' source scope for BUFFER."
+  (let ((buffer (or (and (bufferp buffer) buffer)
+                    (and buffer (get-buffer buffer))
+                    (current-buffer))))
+    (or (and buffer
+             (packlet--source-scope-file
+              (buffer-file-name buffer)))
+        (packlet--current-eval-scope buffer))))
+
 (defun packlet--source-entries (scope)
   "Return the registered source entries for SCOPE."
   (let ((scope (packlet--normalize-source-scope scope)))
@@ -261,6 +271,78 @@ Return entries whose cleanup failed."
          scope
          (packlet--replace-source-entry (packlet--source-entries scope)
                                         entry))))))
+
+(defun packlet--resolve-source-scope (source)
+  "Normalize SOURCE into a registered `packlet' source scope."
+  (let ((scope
+         (cond
+          ((null source)
+           (packlet--buffer-source-scope))
+          ((bufferp source)
+           (packlet--buffer-source-scope source))
+          ((stringp source)
+           (packlet--source-scope-file source))
+          (t
+           (packlet--normalize-source-scope source)))))
+    (unless scope
+      (error "packlet: could not resolve source scope from %S" source))
+    scope))
+
+(defun packlet--source-scope-name (scope)
+  "Return a human-readable label for SOURCE SCOPE."
+  (pcase (packlet--normalize-source-scope scope)
+    (`(:file ,file)
+     (format "File: %s" file))
+    (`(:buffer ,buffer)
+     (format "Buffer: %s" (buffer-name buffer)))
+    (_
+     (format "Scope: %S" scope))))
+
+(defun packlet--source-entry-kind (entry)
+  "Return a short kind label for source ENTRY."
+  (let ((id (packlet--source-entry-id entry)))
+    (pcase id
+      (`(:after-load ,_ ,_)
+       :after-load-handler)
+      (`(:idle ,_)
+       :idle-loader)
+      (`(:keymap ,_)
+       :keymap-binding)
+      (`(,_ ,kind ,_)
+       (if (keywordp kind)
+           kind
+         :entry))
+      (_
+       :entry))))
+
+(defun packlet--describe-source-string (source)
+  "Return a textual description of `packlet' SOURCE registrations."
+  (let* ((scope (packlet--resolve-source-scope source))
+         (entries (packlet--source-entries scope)))
+    (concat
+     (packlet--source-scope-name scope)
+     "\n"
+     (format "Entries: %d\n" (length entries))
+     (if entries
+         (mapconcat
+          (lambda (entry)
+            (format "- %s %S"
+                    (packlet--source-entry-kind entry)
+                    (packlet--source-entry-id entry)))
+          entries
+          "\n")
+       "- none"))))
+
+;;;###autoload
+(defun packlet-describe-source (&optional source)
+  "Describe the `packlet' registrations owned by SOURCE.
+SOURCE may be nil, a file name, a buffer, or a normalized source scope."
+  (interactive)
+  (let ((description (packlet--describe-source-string source)))
+    (when (called-interactively-p 'interactive)
+      (with-help-window (help-buffer)
+        (princ description)))
+    description))
 
 (defun packlet--form-contains-packlet-p (form &optional seen)
   "Return non-nil when FORM appears to contain a `packlet' call."
@@ -652,8 +734,8 @@ restore the previous binding even when KEY no longer points at COMMAND."
 (eval-and-compile
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :config :commands :autoload :mode :hook
-            :bind :bind-keymap :after :after-load :idle :demand :functions
-            :defines))
+            :bind :bind-keymap :interpreter :after :after-load :idle :demand
+            :functions :defines))
 
   (defvar packlet--user-keywords nil
     "Alist of (KEYWORD . PLIST) for user-defined keywords.
@@ -1202,6 +1284,10 @@ Example:
                  (packlet--section sections :mode)
                  :mode
                  #'packlet--mode-entry-p))
+         (interpreters (packlet--normalize-pairs
+                        (packlet--section sections :interpreter)
+                        :interpreter
+                        #'packlet--mode-entry-p))
          (hooks (packlet--normalize-hooks
                  (packlet--section sections :hook)))
          (bindings (packlet--normalize-bindings
@@ -1274,6 +1360,20 @@ Example:
               (lambda ()
                 (setq auto-mode-alist
                       (delete ',mode auto-mode-alist))))))
+       ,@(cl-loop
+          for interpreter in interpreters
+          for index from 0
+          collect
+          `(progn
+             (packlet--maybe-autoload ',(cdr interpreter) ,file t)
+             (packlet--register-source-entry
+              ',source-scope
+              ',(list site :interpreter index)
+              (lambda ()
+                (add-to-list 'interpreter-mode-alist ',interpreter))
+              (lambda ()
+                (setq interpreter-mode-alist
+                      (delete ',interpreter interpreter-mode-alist))))))
        ,@(cl-loop
           for hook in hooks
           for index from 0
