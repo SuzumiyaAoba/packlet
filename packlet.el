@@ -101,8 +101,11 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
   install
   cleanup)
 
-(defvar packlet--source-states (make-hash-table :test #'equal)
-  "Registered `packlet' source entries keyed by evaluation scope.")
+(defvar packlet--file-source-states (make-hash-table :test #'equal)
+  "Registered file-backed `packlet' source entries keyed by file scope.")
+
+(defvar packlet--buffer-source-states (make-hash-table :test #'eq :weakness 'key)
+  "Registered buffer-backed `packlet' source entries keyed by buffer.")
 
 (defvar packlet--active-source-scope nil
   "Dynamic source scope for the `packlet' evaluation session in progress.")
@@ -145,16 +148,27 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 
 (defun packlet--source-entries (scope)
   "Return the registered source entries for SCOPE."
-  (copy-sequence
-   (gethash (packlet--normalize-source-scope scope)
-            packlet--source-states)))
+  (let ((scope (packlet--normalize-source-scope scope)))
+    (copy-sequence
+     (pcase scope
+       (`(:file ,_)
+        (gethash scope packlet--file-source-states))
+       (`(:buffer ,buffer)
+        (gethash buffer packlet--buffer-source-states))
+       (_ nil)))))
 
 (defun packlet--set-source-entries (scope entries)
   "Set registered source ENTRIES for SCOPE."
   (let ((scope (packlet--normalize-source-scope scope)))
-    (if entries
-        (puthash scope entries packlet--source-states)
-      (remhash scope packlet--source-states))))
+    (pcase scope
+      (`(:file ,_)
+       (if entries
+           (puthash scope entries packlet--file-source-states)
+         (remhash scope packlet--file-source-states)))
+      (`(:buffer ,buffer)
+       (if entries
+           (puthash buffer entries packlet--buffer-source-states)
+         (remhash buffer packlet--buffer-source-states))))))
 
 (defun packlet--cleanup-source-scope (scope &optional preserve-failed)
   "Run cleanup for SOURCE SCOPE.
@@ -268,7 +282,9 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
               (packlet--pending-source-entries nil))
           (condition-case err
               (let ((result (funcall thunk)))
-                (packlet--set-source-entries scope packlet--pending-source-entries)
+                (packlet--set-source-entries
+                 scope
+                 (append old-cleanup-failures packlet--pending-source-entries))
                 result)
             (error
              (packlet--run-source-entry-cleanups
@@ -319,15 +335,19 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
 
 (defun packlet--eval-advice (orig form &optional lexical)
   "Prepare non-file-backed `packlet' state before direct `eval'."
-  (if (or load-file-name
-          packlet--active-source-scope
-          (not (packlet--form-contains-packlet-p form)))
+  (let ((lisp-buffer-p
+         (derived-mode-p 'emacs-lisp-mode 'lisp-interaction-mode)))
+    (if (or load-file-name
+            packlet--active-source-scope
+            (not (if lisp-buffer-p
+                     (packlet--form-contains-packlet-p form)
+                   (eq (car-safe form) 'packlet))))
       (funcall orig form lexical)
-    (packlet--with-source-session
-     (packlet--current-eval-scope)
-     nil
-     (lambda ()
-       (funcall orig form lexical)))))
+      (packlet--with-source-session
+       (packlet--current-eval-scope)
+       nil
+       (lambda ()
+         (funcall orig form lexical))))))
 
 (defun packlet--kill-buffer-hook ()
   "Clean up `packlet' registrations owned by the current buffer."

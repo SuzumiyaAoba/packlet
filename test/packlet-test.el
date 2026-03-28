@@ -136,6 +136,34 @@
         (packlet--run-source-entry-cleanups failed scope)
         (should (equal calls '(:last :first :recovered)))))))
 
+(ert-deftest packlet-test-source-session-preserves-old-cleanup-failures-on-success ()
+  (let ((scope '(:buffer keep-failed-buffer))
+        (warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &optional _level)
+                 (push message warnings))))
+      (packlet--set-source-entries
+       scope
+       (list
+        (packlet--make-source-entry
+         :id 'stale
+         :install #'ignore
+         :cleanup (lambda ()
+                    (error "boom")))))
+      (packlet--with-source-session
+       scope
+       nil
+       (lambda ()
+         (packlet--register-source-entry
+          scope
+          'fresh
+          #'ignore
+          #'ignore)))
+      (should (= (length warnings) 1))
+      (should (equal (mapcar #'packlet--source-entry-id
+                             (packlet--source-entries scope))
+                     '(stale fresh))))))
+
 (ert-deftest packlet-test-command-autoload-and-config ()
   (let* ((directory (make-temp-file "packlet-test-" t))
          (load-path (cons directory load-path))
@@ -554,12 +582,12 @@
                         . (lambda ()
                             (setq packlet-test-hook-count
                                   (1+ packlet-test-hook-count))))))))
-          (should (gethash scope packlet--source-states))
+          (should (packlet--source-entries scope))
           (kill-buffer buffer)
           (setq buffer nil)
           (run-hooks 'packlet-test-buffer-scope-hook)
           (should (= packlet-test-hook-count 0))
-          (should-not (gethash scope packlet--source-states)))
+          (should-not (packlet--source-entries scope)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer))
       (setq packlet-test-hook-count nil)
