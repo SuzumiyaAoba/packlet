@@ -98,12 +98,181 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 (defvar packlet--expansion-load-states (make-hash-table :test #'equal)
   "Expansion state for file-backed `packlet' macro calls.")
 
+(cl-defstruct (packlet--source-entry
+               (:constructor packlet--make-source-entry))
+  id
+  install
+  cleanup)
+
+(defvar packlet--source-states (make-hash-table :test #'equal)
+  "Registered `packlet' source entries keyed by evaluation scope.")
+
+(defvar packlet--active-source-scope nil
+  "Dynamic source scope for the `packlet' evaluation session in progress.")
+
+(defvar packlet--pending-source-entries nil
+  "Entries registered during the active `packlet' evaluation session.")
+
 (defun packlet--warn (format-string &rest args)
   "Emit a `packlet' warning using FORMAT-STRING and ARGS."
   (when packlet-warn-on-missing-libraries
     (display-warning 'packlet
                      (apply #'format format-string args)
                      :warning)))
+
+(defun packlet--normalize-source-scope (scope)
+  "Normalize SOURCE scope key SCOPE."
+  (pcase scope
+    (`(:file ,file)
+     (list :file (expand-file-name file)))
+    (`(:buffer ,buffer)
+     (list :buffer buffer))
+    (_ scope)))
+
+(defun packlet--source-scope-file (file)
+  "Return the source scope for FILE."
+  (and file
+       (packlet--normalize-source-scope (list :file file))))
+
+(defun packlet--current-eval-scope (&optional buffer)
+  "Return the current non-file-backed evaluation scope for BUFFER."
+  (let ((buffer (or (and (bufferp buffer) buffer)
+                    (and buffer (get-buffer buffer))
+                    (current-buffer))))
+    (when-let ((scope-buffer
+                (and buffer
+                     (if (minibufferp buffer)
+                         (window-buffer (minibuffer-selected-window))
+                       buffer))))
+      (packlet--normalize-source-scope (list :buffer scope-buffer)))))
+
+(defun packlet--source-entries (scope)
+  "Return the registered source entries for SCOPE."
+  (copy-sequence
+   (gethash (packlet--normalize-source-scope scope)
+            packlet--source-states)))
+
+(defun packlet--set-source-entries (scope entries)
+  "Set registered source ENTRIES for SCOPE."
+  (let ((scope (packlet--normalize-source-scope scope)))
+    (if entries
+        (puthash scope entries packlet--source-states)
+      (remhash scope packlet--source-states))))
+
+(defun packlet--replace-source-entry (entries entry)
+  "Return ENTRIES with ENTRY inserted or replaced by id."
+  (let ((id (packlet--source-entry-id entry))
+        (replaced nil)
+        result)
+    (dolist (existing entries)
+      (if (equal (packlet--source-entry-id existing) id)
+          (progn
+            (push entry result)
+            (setq replaced t))
+        (push existing result)))
+    (unless replaced
+      (push entry result))
+    (nreverse result)))
+
+(defun packlet--run-source-entry-cleanups (entries scope)
+  "Run cleanup functions in ENTRIES for SCOPE in reverse registration order.
+Return entries whose cleanup failed."
+  (let (failed)
+    (dolist (entry (reverse (copy-sequence entries)))
+      (condition-case err
+          (funcall (packlet--source-entry-cleanup entry))
+        (error
+         (push entry failed)
+         (packlet--warn "Cleanup for `%s' failed: %S" scope err))))
+    (nreverse failed)))
+
+(defun packlet--run-source-entry-installs (entries scope)
+  "Run install functions in ENTRIES for SCOPE in registration order."
+  (dolist (entry entries)
+    (condition-case err
+        (funcall (packlet--source-entry-install entry))
+      (error
+       (packlet--warn "Rollback for `%s' failed: %S" scope err)))))
+
+(defun packlet--register-source-entry (scope id install cleanup)
+  "Install and track a source-backed entry under ID for SCOPE."
+  (let* ((scope (packlet--normalize-source-scope
+                 (or scope packlet--active-source-scope)))
+         (entry (packlet--make-source-entry
+                 :id id
+                 :install install
+                 :cleanup cleanup)))
+    (funcall install)
+    (when scope
+      (if (equal scope packlet--active-source-scope)
+          (setq packlet--pending-source-entries
+                (packlet--replace-source-entry packlet--pending-source-entries
+                                              entry))
+        (packlet--set-source-entries
+         scope
+         (packlet--replace-source-entry (packlet--source-entries scope)
+                                        entry))))))
+
+(defun packlet--form-contains-packlet-p (form &optional depth)
+  "Return non-nil when FORM appears to contain a `packlet' call."
+  (let ((depth (or depth 24)))
+    (cond
+     ((<= depth 0) nil)
+     ((symbolp form) (eq form 'packlet))
+     ((consp form)
+      (or (eq (car form) 'packlet)
+          (packlet--form-contains-packlet-p (car form) (1- depth))
+          (packlet--form-contains-packlet-p (cdr form) (1- depth))))
+     ((vectorp form)
+      (let ((index 0)
+            found)
+        (while (and (< index (length form))
+                    (not found))
+          (setq found
+                (packlet--form-contains-packlet-p
+                 (aref form index)
+                 (1- depth))
+                index (1+ index)))
+        found))
+     (t nil))))
+
+(defun packlet--with-source-session (scope expansion-file thunk)
+  "Evaluate THUNK transactionally for SOURCE SCOPE.
+When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
+  (let ((scope (packlet--normalize-source-scope scope)))
+    (if (or (null scope)
+            packlet--active-source-scope)
+        (funcall thunk)
+      (let* ((old-entries (packlet--source-entries scope))
+             (old-expansion-state
+              (and expansion-file
+                   (gethash expansion-file packlet--expansion-load-states)))
+             (old-cleanup-failures
+              (packlet--run-source-entry-cleanups old-entries scope)))
+        (packlet--set-source-entries scope nil)
+        (when expansion-file
+          (remhash expansion-file packlet--expansion-load-states))
+        (let ((packlet--active-source-scope scope)
+              (packlet--pending-source-entries nil))
+          (condition-case err
+              (let ((result (funcall thunk)))
+                (packlet--set-source-entries scope packlet--pending-source-entries)
+                result)
+            (error
+             (packlet--run-source-entry-cleanups
+              packlet--pending-source-entries
+              scope)
+             (packlet--run-source-entry-installs old-entries scope)
+             (packlet--set-source-entries
+              scope
+              (append old-entries old-cleanup-failures))
+             (when expansion-file
+               (if old-expansion-state
+                   (puthash expansion-file
+                            old-expansion-state
+                            packlet--expansion-load-states)
+                 (remhash expansion-file packlet--expansion-load-states)))
+             (signal (car err) (cdr err)))))))))
 
 (defun packlet--register-file-cleanup (file cleanup)
   "Register CLEANUP to run before FILE is evaluated again."
@@ -145,25 +314,46 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 (defun packlet--eval-buffer-advice (orig &optional buffer printflag filename
                                          unibyte do-allow-print)
   "Prepare file-backed `packlet' state before `eval-buffer'."
-  ;; `load' evaluates source files via `eval-buffer'.  Skip cleanup in
-  ;; that path so loading a feature file that happens to share the same
-  ;; pathname as a previously evaluated config buffer does not wipe the
-  ;; freshly registered handlers right before `provide'.
-  (unless load-file-name
-    (packlet--prepare-file-eval
-     (packlet--eval-buffer-source-file buffer filename)))
-  (funcall orig buffer printflag filename unibyte do-allow-print))
+  (if load-file-name
+      (funcall orig buffer printflag filename unibyte do-allow-print)
+    (let* ((file (packlet--eval-buffer-source-file buffer filename))
+           (scope (or (packlet--source-scope-file file)
+                      (packlet--current-eval-scope buffer))))
+      (packlet--with-source-session
+       scope
+       (and file (expand-file-name file))
+       (lambda ()
+         (funcall orig buffer printflag filename unibyte do-allow-print))))))
 
 (defun packlet--load-file-advice (orig file &rest args)
   "Prepare file-backed `packlet' state before `load-file'."
-  (packlet--prepare-file-eval file)
-  (apply orig file args))
+  (let ((file (expand-file-name file)))
+    (packlet--with-source-session
+     (packlet--source-scope-file file)
+     file
+     (lambda ()
+       (apply orig file args)))))
+
+(defun packlet--eval-advice (orig form &optional lexical)
+  "Prepare non-file-backed `packlet' state before direct `eval'."
+  (if (or load-file-name
+          packlet--active-source-scope
+          (not (packlet--form-contains-packlet-p form)))
+      (funcall orig form lexical)
+    (packlet--with-source-session
+     (packlet--current-eval-scope)
+     nil
+     (lambda ()
+       (funcall orig form lexical)))))
 
 (unless (advice-member-p #'packlet--eval-buffer-advice 'eval-buffer)
   (advice-add 'eval-buffer :around #'packlet--eval-buffer-advice))
 
 (unless (advice-member-p #'packlet--load-file-advice 'load-file)
   (advice-add 'load-file :around #'packlet--load-file-advice))
+
+(unless (advice-member-p #'packlet--eval-advice 'eval)
+  (advice-add 'eval :around #'packlet--eval-advice))
 
 (defun packlet--autoloads-file (file)
   "Return the autoload library name for FILE."
@@ -201,7 +391,8 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
     (setq entries (cl-remove id entries :key #'car :test #'equal))
     (if entries
         (puthash feature entries packlet--after-load-handlers)
-      (remhash feature packlet--after-load-handlers))))
+      (remhash feature packlet--after-load-handlers)
+      (remhash feature packlet--after-load-dispatchers))))
 
 (defun packlet--run-after-load-handlers (feature)
   "Run registered handlers for watched FEATURE."
@@ -211,22 +402,24 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 (defun packlet--register-after-load-handler (feature id function
                                                      &optional source-file)
   "Register FUNCTION under ID for watched FEATURE."
-  (let* ((entries (copy-sequence (packlet--after-load-handler-entries feature)))
-         (cell (assoc id entries)))
-    (if cell
-        (setcdr cell function)
-      (setq entries (append entries (list (cons id function)))))
-    (puthash feature entries packlet--after-load-handlers))
-  (packlet--register-file-cleanup
-   source-file
+  (packlet--register-source-entry
+   (packlet--source-scope-file source-file)
+   (list :after-load feature id)
    (lambda ()
-     (packlet--unregister-after-load-handler feature id)))
-  (unless (gethash feature packlet--after-load-dispatchers)
-    (puthash feature t packlet--after-load-dispatchers)
-    (with-eval-after-load feature
-      (packlet--run-after-load-handlers feature)))
-  (when (featurep feature)
-    (funcall function)))
+     (let* ((entries (copy-sequence (packlet--after-load-handler-entries feature)))
+            (cell (assoc id entries)))
+       (if cell
+           (setcdr cell function)
+         (setq entries (append entries (list (cons id function)))))
+       (puthash feature entries packlet--after-load-handlers))
+     (unless (gethash feature packlet--after-load-dispatchers)
+       (puthash feature t packlet--after-load-dispatchers)
+       (with-eval-after-load feature
+         (packlet--run-after-load-handlers feature)))
+     (when (featurep feature)
+       (funcall function)))
+   (lambda ()
+     (packlet--unregister-after-load-handler feature id))))
 
 (defun packlet--register-after-load (id feature function afters
                                         &optional source-file)
@@ -298,48 +491,50 @@ ID identifies the current `packlet' expansion."
 AFTERS must be loaded before scheduling begins.  When FILE is non-nil,
 use it as a fallback library name.  DELAY is the idle duration in seconds.
 ID identifies the current `packlet' expansion."
-  (let ((state (or (gethash id packlet--idle-load-states)
-                   (puthash id (packlet--make-idle-state)
-                            packlet--idle-load-states))))
-    (packlet--register-file-cleanup
-     source-file
-     (lambda ()
-       (when-let ((cleanup-state (gethash id packlet--idle-load-states)))
-         (packlet--cancel-idle-load-timer cleanup-state)
-         (when-let ((startup-hook
-                     (packlet--idle-state-startup-hook cleanup-state)))
-           (remove-hook 'emacs-startup-hook startup-hook)
-           (setf (packlet--idle-state-startup-hook cleanup-state) nil))
-         (remhash id packlet--idle-load-states))))
-    (packlet--cancel-idle-load-timer state)
-    (when-let ((startup-hook (packlet--idle-state-startup-hook state)))
-      (remove-hook 'emacs-startup-hook startup-hook)
-      (setf (packlet--idle-state-startup-hook state) nil))
-    (setf (packlet--idle-state-feature state) feature
-          (packlet--idle-state-afters state) afters
-          (packlet--idle-state-file state) file
-          (packlet--idle-state-delay state) (or delay 1.0)
-          (packlet--idle-state-startup-complete state) after-init-time)
-    (unless (packlet--idle-state-startup-complete state)
-      (let ((startup-hook
-             (lambda ()
-               (when-let ((idle-state (gethash id packlet--idle-load-states)))
-                 (setf (packlet--idle-state-startup-complete idle-state) t)
-                 (when-let ((registered-hook
-                             (packlet--idle-state-startup-hook idle-state)))
-                   (remove-hook 'emacs-startup-hook registered-hook)
-                   (setf (packlet--idle-state-startup-hook idle-state) nil))
-                 (packlet--maybe-schedule-idle-load id)))))
-        (setf (packlet--idle-state-startup-hook state) startup-hook)
-        (add-hook 'emacs-startup-hook startup-hook)))
-    (dolist (after afters)
-      (packlet--register-after-load-handler
-       after
-       (list id after)
-       (lambda ()
-         (packlet--maybe-schedule-idle-load id))
-       source-file))
-    (packlet--maybe-schedule-idle-load id)))
+  (packlet--register-source-entry
+   (packlet--source-scope-file source-file)
+   (list :idle id)
+   (lambda ()
+     (let ((state (or (gethash id packlet--idle-load-states)
+                      (puthash id (packlet--make-idle-state)
+                               packlet--idle-load-states))))
+       (packlet--cancel-idle-load-timer state)
+       (when-let ((startup-hook (packlet--idle-state-startup-hook state)))
+         (remove-hook 'emacs-startup-hook startup-hook)
+         (setf (packlet--idle-state-startup-hook state) nil))
+       (setf (packlet--idle-state-feature state) feature
+             (packlet--idle-state-afters state) afters
+             (packlet--idle-state-file state) file
+             (packlet--idle-state-delay state) (or delay 1.0)
+             (packlet--idle-state-startup-complete state) after-init-time)
+       (unless (packlet--idle-state-startup-complete state)
+         (let ((startup-hook
+                (lambda ()
+                  (when-let ((idle-state (gethash id packlet--idle-load-states)))
+                    (setf (packlet--idle-state-startup-complete idle-state) t)
+                    (when-let ((registered-hook
+                                (packlet--idle-state-startup-hook idle-state)))
+                      (remove-hook 'emacs-startup-hook registered-hook)
+                      (setf (packlet--idle-state-startup-hook idle-state) nil))
+                    (packlet--maybe-schedule-idle-load id)))))
+           (setf (packlet--idle-state-startup-hook state) startup-hook)
+           (add-hook 'emacs-startup-hook startup-hook)))
+       (dolist (after afters)
+         (packlet--register-after-load-handler
+          after
+          (list id after)
+          (lambda ()
+            (packlet--maybe-schedule-idle-load id))
+          source-file))
+       (packlet--maybe-schedule-idle-load id)))
+   (lambda ()
+     (when-let ((cleanup-state (gethash id packlet--idle-load-states)))
+       (packlet--cancel-idle-load-timer cleanup-state)
+       (when-let ((startup-hook
+                   (packlet--idle-state-startup-hook cleanup-state)))
+         (remove-hook 'emacs-startup-hook startup-hook)
+         (setf (packlet--idle-state-startup-hook cleanup-state) nil))
+       (remhash id packlet--idle-load-states)))))
 
 (defun packlet--resolve-keymap (keymap)
   "Return the keymap named by KEYMAP, or nil when it is not yet bound."
@@ -355,27 +550,29 @@ ID identifies the current `packlet' expansion."
 FEATURE and AFTERS are watched for opportunities to install the binding.
 ID identifies the current `packlet' expansion."
   (let (installed-map previous-binding)
-    (packlet--register-file-cleanup
-     source-file
+    (packlet--register-source-entry
+     (packlet--source-scope-file source-file)
+     (list :keymap id)
+     (lambda ()
+       (let ((install
+              (lambda ()
+                (when-let ((map (packlet--resolve-keymap keymap)))
+                  (unless installed-map
+                    (setq installed-map map
+                          previous-binding (lookup-key map key)))
+                  (define-key map key command)))))
+         (packlet--register-after-load-handler
+          feature (list id feature) install source-file)
+         (dolist (after afters)
+           (packlet--register-after-load-handler
+            after (list id after) install source-file))
+         (funcall install)))
      (lambda ()
        (when installed-map
          (when (eq (lookup-key installed-map key) command)
            (define-key installed-map key previous-binding))
          (setq installed-map nil
-               previous-binding nil))))
-    (let ((install
-           (lambda ()
-             (when-let ((map (packlet--resolve-keymap keymap)))
-               (unless installed-map
-                 (setq installed-map map
-                       previous-binding (lookup-key map key)))
-               (define-key map key command)))))
-      (packlet--register-after-load-handler
-       feature (list id feature) install source-file)
-      (dolist (after afters)
-        (packlet--register-after-load-handler
-         after (list id after) install source-file))
-      (funcall install))))
+               previous-binding nil))))))
 
 (eval-and-compile
   (defconst packlet--keywords
@@ -850,6 +1047,8 @@ Example:
   (let* ((sections (packlet--parse-body body))
          (site (packlet--expansion-site feature body))
          (source-file (packlet--site-file site))
+         (source-scope (and source-file
+                            (list :file source-file)))
          (init-forms (packlet--section sections :init))
          (setq-forms (packlet--normalize-customs
                       (packlet--section sections :setq)))
@@ -929,18 +1128,20 @@ Example:
                   (interactive (nth 2 entry)))
               `(packlet--maybe-autoload ',function ,(or entry-file file) ,interactive)))
           autoloads)
-       ,@(mapcar
-          (lambda (mode)
-            `(let ((existing (member ',mode auto-mode-alist)))
-               (packlet--maybe-autoload ',(cdr mode) ,file t)
-               (add-to-list 'auto-mode-alist ',mode)
-               (unless existing
-                 (packlet--register-file-cleanup
-                  ,source-file
-                  (lambda ()
-                    (setq auto-mode-alist
-                          (delete ',mode auto-mode-alist)))))))
-          modes)
+       ,@(cl-loop
+          for mode in modes
+          for index from 0
+          collect
+          `(progn
+             (packlet--maybe-autoload ',(cdr mode) ,file t)
+             (packlet--register-source-entry
+              ',source-scope
+              ',(list site :mode index)
+              (lambda ()
+                (add-to-list 'auto-mode-alist ',mode))
+              (lambda ()
+                (setq auto-mode-alist
+                      (delete ',mode auto-mode-alist))))))
        ,@(cl-loop
           for hook in hooks
           for index from 0
@@ -966,22 +1167,24 @@ Example:
                   `((defvar ,timer-var nil)
                     ,@(when (symbolp function)
                         `((packlet--maybe-autoload ',function ,file nil)))
-                    (when (timerp ,timer-var)
-                      (cancel-timer ,timer-var)
-                      (setq ,timer-var nil))
-                    (defalias ',hook-function
-                      (lambda ()
-                        (when (timerp ,timer-var)
-                          (cancel-timer ,timer-var))
-                        (setq ,timer-var
-                              (run-with-idle-timer
-                               ,delay nil
-                               (lambda ()
-                                 (setq ,timer-var nil)
-                                 (funcall ,(packlet--hook-function-form function)))))))
-                    (add-hook ',hook-var ',hook-function)
-                    (packlet--register-file-cleanup
-                     ,source-file
+                    (packlet--register-source-entry
+                     ',source-scope
+                     ',(list site :hook index)
+                     (lambda ()
+                       (when (timerp ,timer-var)
+                         (cancel-timer ,timer-var)
+                         (setq ,timer-var nil))
+                       (defalias ',hook-function
+                         (lambda ()
+                           (when (timerp ,timer-var)
+                             (cancel-timer ,timer-var))
+                           (setq ,timer-var
+                                 (run-with-idle-timer
+                                  ,delay nil
+                                  (lambda ()
+                                    (setq ,timer-var nil)
+                                    (funcall ,(packlet--hook-function-form function)))))))
+                       (add-hook ',hook-var ',hook-function))
                      (lambda ()
                        (remove-hook ',hook-var ',hook-function)
                        (when (boundp ',timer-var)
@@ -993,12 +1196,14 @@ Example:
               `((progn
                   ,@(when (symbolp function)
                       `((packlet--maybe-autoload ',function ,file nil)))
-                  (defalias ',hook-function
-                    (lambda ()
-                      (funcall ,(packlet--hook-function-form function))))
-                  (add-hook ',hook-var ',hook-function)
-                  (packlet--register-file-cleanup
-                   ,source-file
+                  (packlet--register-source-entry
+                   ',source-scope
+                   ',(list site :hook index)
+                   (lambda ()
+                     (defalias ',hook-function
+                       (lambda ()
+                         (funcall ,(packlet--hook-function-form function))))
+                     (add-hook ',hook-var ',hook-function))
                    (lambda ()
                      (remove-hook ',hook-var ',hook-function)
                      (when (fboundp ',hook-function)
@@ -1018,14 +1223,16 @@ Example:
               (`(:global ,key ,command)
                `(progn
                   (defvar ,previous-binding-var nil)
-                  (setq ,previous-binding-var
-                        (lookup-key global-map ,(packlet--key-form key)))
                   (packlet--maybe-autoload ',command ,file t)
-                  (global-set-key
-                   ,(packlet--key-form key)
-                   ',command)
-                  (packlet--register-file-cleanup
-                   ,source-file
+                  (packlet--register-source-entry
+                   ',source-scope
+                   ',binding-id
+                   (lambda ()
+                     (setq ,previous-binding-var
+                           (lookup-key global-map ,(packlet--key-form key)))
+                     (global-set-key
+                      ,(packlet--key-form key)
+                      ',command))
                    (lambda ()
                      (when (eq (lookup-key global-map ,(packlet--key-form key))
                                ',command)
@@ -1057,19 +1264,21 @@ Example:
                   (format "after-load-%d" index)))
                 (after-load-id (list site :after-load index)))
             `(progn
-               (defalias ',after-load-function
-                 (lambda ()
-                   ,@(cdr entry)))
+               (packlet--register-source-entry
+                ',source-scope
+                ',(list site :after-load-function index)
+                (lambda ()
+                  (defalias ',after-load-function
+                    (lambda ()
+                      ,@(cdr entry))))
+                (lambda ()
+                  (when (fboundp ',after-load-function)
+                    (fmakunbound ',after-load-function))))
                (packlet--register-after-load-handler
                 ',(car entry)
                 ',after-load-id
                 ',after-load-function
-                ,source-file)
-               (packlet--register-file-cleanup
-                ,source-file
-                (lambda ()
-                  (when (fboundp ',after-load-function)
-                    (fmakunbound ',after-load-function)))))))
+                ,source-file))))
        ,@user-forms
        ,@(when (packlet--has-section-p sections :idle)
            `((when-let ((delay (packlet--idle-delay ,idle-form)))
@@ -1082,27 +1291,29 @@ Example:
                 ,source-file))))
        ,@(when config-forms
            `((defvar ,configured-var nil)
-             (setq ,configured-var nil)
-             (defalias ',config-function
-               (lambda ()
-                 (when (and (not ,configured-var)
-                            (featurep ',feature)
-                            (packlet--all-features-loaded-p ',afters))
-                   (setq ,configured-var t)
-                   ,@config-forms)))
+             (packlet--register-source-entry
+              ',source-scope
+              ',(list site :config-state)
+              (lambda ()
+                (setq ,configured-var nil)
+                (defalias ',config-function
+                  (lambda ()
+                    (when (and (not ,configured-var)
+                               (featurep ',feature)
+                               (packlet--all-features-loaded-p ',afters))
+                      (setq ,configured-var t)
+                      ,@config-forms))))
+              (lambda ()
+                (when (boundp ',configured-var)
+                  (makunbound ',configured-var))
+                (when (fboundp ',config-function)
+                  (fmakunbound ',config-function))))
              (packlet--register-after-load
               ',(list site :config)
               ',feature
               ',config-function
               ',afters
-              ,source-file)
-             (packlet--register-file-cleanup
-              ,source-file
-              (lambda ()
-                (when (boundp ',configured-var)
-                  (makunbound ',configured-var))
-                (when (fboundp ',config-function)
-                  (fmakunbound ',config-function))))))
+              ,source-file)))
        ,@(when (packlet--has-section-p sections :demand)
            `((when ,demand-form
                (packlet--register-demand-load

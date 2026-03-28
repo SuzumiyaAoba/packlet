@@ -455,6 +455,37 @@
       (packlet-test--cleanup-feature feature)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-file-reeval-error-rolls-back-old-hook ()
+  (let ((source-file (make-temp-file "packlet-test-rollback-" nil ".el")))
+    (defvar packlet-test-rollback-hook nil)
+    (unwind-protect
+        (progn
+          (setq packlet-test-hook-count 0
+                packlet-test-rollback-hook nil)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-rollback-feature\n\
+  :hook ((packlet-test-rollback-hook\n\
+          . (lambda ()\n\
+              (setq packlet-test-hook-count (1+ packlet-test-hook-count))))))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (erase-buffer)
+            (insert "(packlet packlet-test-rollback-feature\n\
+  :hook ((packlet-test-rollback-hook\n\
+          . (lambda ()\n\
+              (setq packlet-test-hook-count (+ packlet-test-hook-count 10))))))\n\
+(this-symbol-does-not-exist)\n")
+            (goto-char (point-min))
+            (should-error (eval-buffer)))
+          (run-hooks 'packlet-test-rollback-hook)
+          (should (= packlet-test-hook-count 1)))
+      (setq packlet-test-hook-count nil)
+      (packlet-test--cleanup-symbols '(packlet-test-rollback-hook))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
 (ert-deftest packlet-test-idle-keyword-registers-loader ()
   (let (calls)
     (cl-letf (((symbol-function 'packlet--register-idle-load)
@@ -472,6 +503,30 @@
                (packlet-test-after)
                "packlet-test-idle-delayed"
                2.5))))))
+
+(ert-deftest packlet-test-nonfile-eval-replaces-old-hook ()
+  (defvar packlet-test-nonfile-hook nil)
+  (unwind-protect
+      (with-temp-buffer
+        (emacs-lisp-mode)
+        (setq packlet-test-hook-count 0
+              packlet-test-nonfile-hook nil)
+        (eval
+         '(packlet packlet-test-nonfile-feature
+            :hook ((packlet-test-nonfile-hook
+                    . (lambda ()
+                        (setq packlet-test-hook-count
+                              (1+ packlet-test-hook-count)))))))
+        (eval
+         '(packlet packlet-test-nonfile-feature
+            :hook ((packlet-test-nonfile-hook
+                    . (lambda ()
+                        (setq packlet-test-hook-count
+                              (+ packlet-test-hook-count 10)))))))
+        (run-hooks 'packlet-test-nonfile-hook)
+        (should (= packlet-test-hook-count 10)))
+    (setq packlet-test-hook-count nil)
+    (packlet-test--cleanup-symbols '(packlet-test-nonfile-hook))))
 
 (ert-deftest packlet-test-idle-load-waits-for-startup ()
   (let ((after-init-time nil)
@@ -962,6 +1017,24 @@
           (should after-load-result))
       (packlet-test--cleanup-feature 'packlet-test-after-load-dep)
       (delete-directory directory t))))
+
+(ert-deftest packlet-test-after-load-dispatcher-clears-when-last-handler-removed ()
+  (let ((feature 'packlet-test-dispatcher-clear))
+    (unwind-protect
+        (progn
+          (clrhash packlet--after-load-handlers)
+          (clrhash packlet--after-load-dispatchers)
+          (packlet--register-after-load-handler
+           feature
+           'first
+           #'ignore)
+          (should (gethash feature packlet--after-load-dispatchers))
+          (should (packlet--after-load-handler-entries feature))
+          (packlet--unregister-after-load-handler feature 'first)
+          (should-not (packlet--after-load-handler-entries feature))
+          (should-not (gethash feature packlet--after-load-dispatchers)))
+      (clrhash packlet--after-load-handlers)
+      (clrhash packlet--after-load-dispatchers))))
 
 (ert-deftest packlet-test-user-defined-keyword ()
   (defvar packlet-test-user-kw-result nil)
