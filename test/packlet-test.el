@@ -368,18 +368,49 @@
       (packlet-test--cleanup-feature feature)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-config-reeval-after-form-removal-clears-old-site ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-reeval-removed)
+         (source-file (expand-file-name "packlet-test-reeval-removed.el" directory)))
+    (unwind-protect
+        (progn
+          (setq packlet-test-reeval-result nil)
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-reeval-removed-loaded t)")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-reeval-removed\n\
+  :config\n\
+  (push 'old packlet-test-reeval-result))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (erase-buffer)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (require feature)
+          (should-not packlet-test-reeval-result))
+      (setq packlet-test-reeval-result nil)
+      (packlet-test--cleanup-feature feature)
+      (delete-directory directory t))))
+
 (ert-deftest packlet-test-idle-keyword-registers-loader ()
   (let (calls)
     (cl-letf (((symbol-function 'packlet--register-idle-load)
-               (lambda (id feature afters file delay)
-                 (push (list id feature afters file delay) calls))))
+               (lambda (id feature afters file delay source-file)
+                 (push (list id feature afters file delay source-file) calls))))
       (packlet packlet-test-idle-default
         :idle)
       (packlet packlet-test-idle-delayed
         :after packlet-test-after
         :idle 2.5))
     (should
-     (equal (mapcar #'cdr (nreverse calls))
+     (equal (mapcar (lambda (call) (cdr (butlast call))) (nreverse calls))
             '((packlet-test-idle-default nil "packlet-test-idle-default" 1.0)
               (packlet-test-idle-delayed
                (packlet-test-after)
@@ -1027,6 +1058,44 @@
         (should (= packlet-test-hook-count 1)))
     (setq packlet-test-hook-count nil)
     (packlet-test--cleanup-symbols '(packlet-test-reeval-hook))))
+
+(ert-deftest packlet-test-hook-reeval-after-entry-removal-clears-old-hook ()
+  (defvar packlet-test-reeval-hook-a nil)
+  (defvar packlet-test-reeval-hook-b nil)
+  (let ((source-file (make-temp-file "packlet-test-hook-remove-" nil ".el")))
+    (unwind-protect
+        (progn
+          (setq packlet-test-hook-count 0
+                packlet-test-reeval-hook-a nil
+                packlet-test-reeval-hook-b nil)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-hook-remove-feature\n\
+  :hook ((packlet-test-reeval-hook-a\n\
+          . (lambda ()\n\
+              (setq packlet-test-hook-count (1+ packlet-test-hook-count))))\n\
+         (packlet-test-reeval-hook-b\n\
+          . (lambda ()\n\
+              (setq packlet-test-hook-count (+ packlet-test-hook-count 10))))))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (erase-buffer)
+            (insert "(packlet packlet-test-hook-remove-feature\n\
+  :hook ((packlet-test-reeval-hook-a\n\
+          . (lambda ()\n\
+              (setq packlet-test-hook-count (1+ packlet-test-hook-count))))))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (run-hooks 'packlet-test-reeval-hook-a)
+          (run-hooks 'packlet-test-reeval-hook-b)
+          (should (= packlet-test-hook-count 1))
+          (should-not packlet-test-reeval-hook-b))
+      (setq packlet-test-hook-count nil)
+      (packlet-test--cleanup-symbols
+       '(packlet-test-reeval-hook-a packlet-test-reeval-hook-b))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
 
 (ert-deftest packlet-test-delayed-hook-reeval-does-not-duplicate ()
   (let* ((scheduled nil)
