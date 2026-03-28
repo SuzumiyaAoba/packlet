@@ -15,6 +15,10 @@
 (defvar packlet-test-command-ran)
 (defvar packlet-test-hook-ran)
 (defvar packlet-test-helper-ran)
+(defvar packlet-test-prefix-command-ran)
+(defvar packlet-test-prefix-map-command-ran)
+(defvar packlet-test-parent-map)
+(defvar packlet-test-child-map)
 (defvar packlet-test-custom-value)
 (defvar packlet-test-compile-variable)
 (defvar packlet-test-compile-function-ran)
@@ -22,6 +26,11 @@
 (defvar packlet-test-compile-second-config-ran)
 (defvar packlet-test-reeval-result)
 (defvar packlet-test-hook-count)
+(defvar packlet-test-tracked-setq 0)
+(defcustom packlet-test-tracked-custom 0
+  "User option used by `packlet' setting tests."
+  :type 'integer
+  :group 'packlet)
 
 (declare-function packlet-test-hook "packlet-test-feature" ())
 (declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
@@ -850,6 +859,143 @@
       (packlet-test--cleanup-symbols symbols)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-bind-keymap-loads-prefix-map ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-prefix-feature)
+         (symbols '(packlet-test-prefix-map
+                    packlet-test-prefix-command
+                    packlet-test-prefix-command-ran))
+         (key (kbd "C-c C-k"))
+         (old-binding (lookup-key global-map key)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols symbols)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-prefix-command-ran nil)\n\
+(defvar packlet-test-prefix-map (make-sparse-keymap))\n\
+(defun packlet-test-prefix-command ()\n\
+  (interactive)\n\
+  (setq packlet-test-prefix-command-ran t))\n\
+(define-key packlet-test-prefix-map (kbd \"a\") #'packlet-test-prefix-command)")
+          (eval
+           `(packlet ,feature
+              :bind-keymap ("C-c C-k" . packlet-test-prefix-map)))
+          (should-not (featurep feature))
+          (should (commandp (lookup-key global-map key)))
+          (execute-kbd-macro (kbd "C-c C-k a"))
+          (should (featurep feature))
+          (should (bound-and-true-p packlet-test-prefix-command-ran))
+          (should (keymapp (lookup-key global-map key))))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols symbols)
+      (if old-binding
+          (global-set-key key old-binding)
+        (global-unset-key key))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-bind-keymap-map-group-loads-prefix-map ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (parent-feature 'packlet-test-prefix-parent)
+         (feature 'packlet-test-prefix-map-feature)
+         (symbols '(packlet-test-parent-map
+                    packlet-test-child-map
+                    packlet-test-prefix-map-command
+                    packlet-test-prefix-map-command-ran)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature parent-feature)
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols symbols)
+          (packlet-test--write-feature
+           directory
+           parent-feature
+           "(defvar packlet-test-parent-map (make-sparse-keymap))")
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-prefix-map-command-ran nil)\n\
+(defvar packlet-test-child-map (make-sparse-keymap))\n\
+(defun packlet-test-prefix-map-command ()\n\
+  (interactive)\n\
+  (setq packlet-test-prefix-map-command-ran t))\n\
+(define-key packlet-test-child-map (kbd \"b\") #'packlet-test-prefix-map-command)")
+          (eval
+           `(packlet ,feature
+              :after ,parent-feature
+              :bind-keymap (:map packlet-test-parent-map
+                             ("C-c m" . packlet-test-child-map))))
+          (should-not (featurep feature))
+          (require parent-feature)
+          (let ((loader (lookup-key packlet-test-parent-map (kbd "C-c m"))))
+            (should (commandp loader))
+            (call-interactively loader))
+          (should (featurep feature))
+          (call-interactively
+           (lookup-key (lookup-key packlet-test-parent-map (kbd "C-c m"))
+                       (kbd "b")))
+          (should (bound-and-true-p packlet-test-prefix-map-command-ran))
+          (should (keymapp (lookup-key packlet-test-parent-map
+                                       (kbd "C-c m")))))
+      (packlet-test--cleanup-feature parent-feature)
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols symbols)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-bind-keymap-reeval-after-removal-restores-old-binding ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-prefix-reeval-feature)
+         (source-file (expand-file-name "packlet-test-prefix-reeval.el"
+                                        directory))
+         (key (kbd "C-c C-r"))
+         (old-binding (lookup-key global-map key)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols
+           '(packlet-test-prefix-reeval-map
+             packlet-test-prefix-command
+             packlet-test-prefix-command-ran))
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-prefix-command-ran nil)\n\
+(defvar packlet-test-prefix-reeval-map (make-sparse-keymap))\n\
+(defun packlet-test-prefix-command ()\n\
+  (interactive)\n\
+  (setq packlet-test-prefix-command-ran t))\n\
+(define-key packlet-test-prefix-reeval-map (kbd \"a\") #'packlet-test-prefix-command)")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-prefix-reeval-feature\n\
+  :bind-keymap (\"C-c C-r\" . packlet-test-prefix-reeval-map))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (execute-kbd-macro (kbd "C-c C-r a"))
+          (should (keymapp (lookup-key global-map key)))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (equal (lookup-key global-map key) old-binding)))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols
+       '(packlet-test-prefix-reeval-map
+         packlet-test-prefix-command
+         packlet-test-prefix-command-ran))
+      (if old-binding
+          (global-set-key key old-binding)
+        (global-unset-key key))
+      (delete-directory directory t))))
+
 (ert-deftest packlet-test-package-autoloads-are-preferred ()
   (let* ((directory (make-temp-file "packlet-test-" t))
          (load-path (cons directory load-path))
@@ -1115,6 +1261,111 @@
              (packlet-test-setq-b "hello")))
     (should (= packlet-test-setq-a 42))
     (should (equal packlet-test-setq-b "hello"))))
+
+(ert-deftest packlet-test-settings-reeval-removal-restores-previous-values ()
+  (let ((source-file (make-temp-file "packlet-test-settings-remove-" nil ".el")))
+    (unwind-protect
+        (progn
+          (setq packlet-test-tracked-setq 10
+                packlet-test-tracked-custom 20)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-settings-remove-feature\n\
+  :setq (packlet-test-tracked-setq 1)\n\
+  :custom (packlet-test-tracked-custom 2))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (should (= packlet-test-tracked-setq 1))
+            (should (= packlet-test-tracked-custom 2))
+            (erase-buffer)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (= packlet-test-tracked-setq 10))
+          (should (= packlet-test-tracked-custom 20)))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
+      (setq packlet-test-tracked-setq 0
+            packlet-test-tracked-custom 0)
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-settings-reeval-error-rolls-back-old-values ()
+  (let ((source-file (make-temp-file "packlet-test-settings-rollback-" nil ".el")))
+    (unwind-protect
+        (progn
+          (setq packlet-test-tracked-setq 10
+                packlet-test-tracked-custom 20)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-settings-rollback-feature\n\
+  :setq (packlet-test-tracked-setq 1)\n\
+  :custom (packlet-test-tracked-custom 2))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (erase-buffer)
+            (insert "(packlet packlet-test-settings-rollback-feature\n\
+  :setq (packlet-test-tracked-setq 3)\n\
+  :custom (packlet-test-tracked-custom 4))\n\
+(this-symbol-does-not-exist)\n")
+            (goto-char (point-min))
+            (should-error (eval-buffer)))
+          (should (= packlet-test-tracked-setq 1))
+          (should (= packlet-test-tracked-custom 2)))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
+      (setq packlet-test-tracked-setq 0
+            packlet-test-tracked-custom 0)
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-settings-removal-preserves-later-user-change ()
+  (let ((source-file (make-temp-file "packlet-test-settings-preserve-" nil ".el")))
+    (unwind-protect
+        (progn
+          (setq packlet-test-tracked-setq 10
+                packlet-test-tracked-custom 20)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-settings-preserve-feature\n\
+  :setq (packlet-test-tracked-setq 1)\n\
+  :custom (packlet-test-tracked-custom 2))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (setq packlet-test-tracked-setq 99
+                packlet-test-tracked-custom 98)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (= packlet-test-tracked-setq 99))
+          (should (= packlet-test-tracked-custom 98)))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
+      (setq packlet-test-tracked-setq 0
+            packlet-test-tracked-custom 0)
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
 
 (ert-deftest packlet-test-load-keyword ()
   (let* ((directory (make-temp-file "packlet-test-" t))

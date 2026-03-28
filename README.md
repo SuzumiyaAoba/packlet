@@ -8,6 +8,7 @@ It focuses on the common parts of package configuration:
 - autoloading helper functions
 - registering `auto-mode-alist` entries
 - wiring hooks, global key bindings, and package keymaps
+- wiring lazy prefix-key keymaps
 - deferring configuration until a feature is actually loaded
 - warming up a feature after startup during idle time
 - optionally demanding a feature once its dependencies are ready
@@ -65,8 +66,9 @@ Clone this repository and add it to `load-path`:
 `packlet` treats reevaluation as a first-class workflow.
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
-  `:config`, `:hook`, `:bind`, `:mode`, `:after-load`, `:idle`, and `:demand`
-  registrations from that source instead of stacking duplicates.
+  `:setq`, `:custom`, `:config`, `:hook`, `:bind`, `:bind-keymap`, `:mode`,
+  `:after-load`, `:idle`, and `:demand` registrations from that source instead
+  of stacking duplicates.
 - File-backed reevaluation is transactional. If the new evaluation fails part
   way through, `packlet` restores the previously working registrations.
 - Direct `eval` is also tracked. In Lisp buffers, nested forms containing
@@ -109,6 +111,11 @@ Clone this repository and add it to `load-path`:
 - `:bind`
   Global key bindings such as `("C-c p" . some-command)` or keymap groups such
   as `(:map some-mode-map ("C-c p" . some-command))`.
+- `:bind-keymap`
+  Lazy prefix-key bindings such as `("C-c p" . projectile-command-map)` or
+  keymap groups such as `(:map some-mode-map ("C-c p" . some-prefix-map))`.
+  The first key press loads the feature, swaps in the real keymap, and replays
+  the original key sequence.
 - `:after`
   Feature symbols that must be loaded before `:config` or `:demand` becomes
   active.
@@ -130,8 +137,9 @@ Clone this repository and add it to `load-path`:
 - `:defines`
   Variable symbols declared with `defvar` for byte compilation.
 
-When using `:bind` with `:map`, add the feature that defines the keymap to
-`:after` if it is different from the package feature you are configuring.
+When using `:bind` or `:bind-keymap` with `:map`, add the feature that defines
+the keymap to `:after` if it is different from the package feature you are
+configuring.
 
 ## Development
 

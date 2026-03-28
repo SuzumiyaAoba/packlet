@@ -606,10 +606,15 @@ ID identifies the current `packlet' expansion."
       value)))
 
 (defun packlet--register-keymap-binding (id feature keymap key command afters
-                                            &optional source-file)
+                                            &optional source-file
+                                            restore-predicate)
   "Bind KEY to COMMAND in KEYMAP when the map becomes available.
 FEATURE and AFTERS are watched for opportunities to install the binding.
-ID identifies the current `packlet' expansion."
+ID identifies the current `packlet' expansion.
+
+When RESTORE-PREDICATE is non-nil, it is called with the current binding
+and the installed map during cleanup.  Returning non-nil allows cleanup to
+restore the previous binding even when KEY no longer points at COMMAND."
   (let (installed-map previous-binding)
     (packlet--register-source-entry
      (packlet--source-scope-file source-file)
@@ -630,15 +635,25 @@ ID identifies the current `packlet' expansion."
          (funcall install)))
      (lambda ()
        (when installed-map
-         (when (eq (lookup-key installed-map key) command)
-           (define-key installed-map key previous-binding))
+         (let ((current (lookup-key installed-map key)))
+           (when (or (eq current command)
+                     (and restore-predicate
+                          (funcall restore-predicate current installed-map)))
+             (define-key installed-map key previous-binding)))
          (setq installed-map nil
                previous-binding nil))))))
+
+(defun packlet--replay-command-keys ()
+  "Replay the key sequence that invoked the current command."
+  (setq unread-command-events
+        (append (listify-key-sequence (this-command-keys-vector))
+                unread-command-events)))
 
 (eval-and-compile
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :config :commands :autoload :mode :hook
-            :bind :after :after-load :idle :demand :functions :defines))
+            :bind :bind-keymap :after :after-load :idle :demand :functions
+            :defines))
 
   (defvar packlet--user-keywords nil
     "Alist of (KEYWORD . PLIST) for user-defined keywords.
@@ -955,6 +970,69 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
           (error "packlet: invalid value %S for :bind" form))))
       (nreverse result)))
 
+  (defun packlet--expand-settings (kind feature site source-scope settings)
+    "Expand SETTINGS for KIND in FEATURE at SITE under SOURCE-SCOPE."
+    (cl-loop
+     for setting in settings
+     for index from 0
+     append
+     (let* ((variable (car setting))
+            (value-form (cadr setting))
+            (value-var
+             (packlet--generated-symbol
+              "packlet--setting-value"
+              feature
+              site
+              (format "%s-%d" (substring (symbol-name kind) 1) index)))
+            (had-value-var
+             (packlet--generated-symbol
+              "packlet--setting-bound"
+              feature
+              site
+              (format "%s-%d" (substring (symbol-name kind) 1) index)))
+            (previous-value-var
+             (packlet--generated-symbol
+              "packlet--setting-previous"
+              feature
+              site
+              (format "%s-%d" (substring (symbol-name kind) 1) index)))
+            (install-form
+             (pcase kind
+               (:setq `(setq ,variable ,value-var))
+               (:custom `(setopt ,variable ,value-var))
+               (_ (error "packlet: unsupported setting kind %S" kind))))
+            (restore-form
+             (pcase kind
+               (:setq `(setq ,variable ,previous-value-var))
+               (:custom `(setopt ,variable ,previous-value-var))
+               (_ (error "packlet: unsupported setting kind %S" kind)))))
+       `((defvar ,value-var nil)
+         (defvar ,had-value-var nil)
+         (defvar ,previous-value-var nil)
+         (packlet--register-source-entry
+          ',source-scope
+          ',(list site kind index)
+          (lambda ()
+            (setq ,value-var ,value-form
+                  ,had-value-var (boundp ',variable))
+            (if ,had-value-var
+                (setq ,previous-value-var ,variable)
+              (when (boundp ',previous-value-var)
+                (makunbound ',previous-value-var)))
+            ,install-form)
+          (lambda ()
+            (when (and (boundp ',variable)
+                       (equal ,variable ,value-var))
+              (if ,had-value-var
+                  ,restore-form
+                (makunbound ',variable)))
+            (when (boundp ',value-var)
+              (makunbound ',value-var))
+            (when (boundp ',had-value-var)
+              (makunbound ',had-value-var))
+            (when (boundp ',previous-value-var)
+              (makunbound ',previous-value-var))))))))
+
   (defun packlet--normalize-customs (forms)
     "Normalize FORMS under `:custom'."
     (let (result)
@@ -1128,6 +1206,8 @@ Example:
                  (packlet--section sections :hook)))
          (bindings (packlet--normalize-bindings
                     (packlet--section sections :bind)))
+         (keymap-bindings (packlet--normalize-bindings
+                           (packlet--section sections :bind-keymap)))
          (afters (packlet--normalize-symbols
                   (packlet--section sections :after)
                   :after))
@@ -1162,14 +1242,8 @@ Example:
           (lambda (function)
             `(declare-function ,function ,file))
           functions)
-       ,@(mapcar
-          (lambda (setting)
-            `(setq ,(car setting) ,(cadr setting)))
-          setq-forms)
-       ,@(mapcar
-          (lambda (setting)
-            `(setopt ,(car setting) ,(cadr setting)))
-          custom-forms)
+       ,@(packlet--expand-settings :setq feature site source-scope setq-forms)
+       ,@(packlet--expand-settings :custom feature site source-scope custom-forms)
        ,@(mapcar
           (lambda (lib)
             `(packlet--load-library ,lib))
@@ -1310,6 +1384,94 @@ Example:
                    ',command
                    ',afters
                    ,source-file))))))
+       ,@(cl-loop
+          for binding in keymap-bindings
+          for index from 0
+          append
+          (let* ((binding-id (list site :bind-keymap index))
+                 (loader-command
+                  (packlet--generated-symbol
+                   "packlet--keymap-loader"
+                   feature
+                   site
+                   (format "bind-keymap-%d" index)))
+                 (command-entry-id (list site :bind-keymap-function index)))
+            (pcase binding
+              (`(:global ,key ,bound-keymap)
+               (let ((target-keymap 'global-map))
+                 `((packlet--register-source-entry
+                    ',source-scope
+                    ',command-entry-id
+                    (lambda ()
+                      (defalias ',loader-command
+                        (lambda ()
+                          (interactive)
+                          (packlet--load-feature ',feature ,file)
+                          (let ((target-map
+                                 (packlet--resolve-keymap ',target-keymap))
+                                (resolved-keymap
+                                 (packlet--resolve-keymap ',bound-keymap)))
+                            (unless target-map
+                              (error "packlet: could not resolve keymap %S"
+                                     ',target-keymap))
+                            (unless resolved-keymap
+                              (error "packlet: %S did not define keymap %S"
+                                     ',feature ',bound-keymap))
+                            (define-key target-map
+                                        ,(packlet--key-form key)
+                                        resolved-keymap)
+                            (packlet--replay-command-keys)))))
+                    (lambda ()
+                      (when (fboundp ',loader-command)
+                        (fmakunbound ',loader-command))))
+                   (packlet--register-keymap-binding
+                    ',binding-id
+                    ',feature
+                    ',target-keymap
+                    ,(packlet--key-form key)
+                    ',loader-command
+                    ',afters
+                    ,source-file
+                    (lambda (current _map)
+                      (eq current
+                          (packlet--resolve-keymap ',bound-keymap)))))))
+              (`(:map ,target-keymap ,key ,bound-keymap)
+               `((packlet--register-source-entry
+                  ',source-scope
+                  ',command-entry-id
+                  (lambda ()
+                    (defalias ',loader-command
+                      (lambda ()
+                        (interactive)
+                        (packlet--load-feature ',feature ,file)
+                        (let ((target-map
+                               (packlet--resolve-keymap ',target-keymap))
+                              (resolved-keymap
+                               (packlet--resolve-keymap ',bound-keymap)))
+                          (unless target-map
+                            (error "packlet: could not resolve keymap %S"
+                                   ',target-keymap))
+                          (unless resolved-keymap
+                            (error "packlet: %S did not define keymap %S"
+                                   ',feature ',bound-keymap))
+                          (define-key target-map
+                                      ,(packlet--key-form key)
+                                      resolved-keymap)
+                          (packlet--replay-command-keys)))))
+                  (lambda ()
+                    (when (fboundp ',loader-command)
+                      (fmakunbound ',loader-command))))
+                 (packlet--register-keymap-binding
+                  ',binding-id
+                  ',feature
+                  ',target-keymap
+                  ,(packlet--key-form key)
+                  ',loader-command
+                  ',afters
+                  ,source-file
+                  (lambda (current _map)
+                    (eq current
+                        (packlet--resolve-keymap ',bound-keymap)))))))))
        ,@(cl-loop
           for entry in after-loads
           for index from 0
