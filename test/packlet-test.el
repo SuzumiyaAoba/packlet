@@ -82,6 +82,11 @@
   "Invoke a fake timer ENTRY captured by test stubs."
   (apply (plist-get entry :fn) (plist-get entry :args)))
 
+(defun packlet-test--nest-progns (depth form)
+  "Wrap FORM in DEPTH nested `progn' forms."
+  (dotimes (_ depth form)
+    (setq form `(progn ,form))))
+
 (ert-deftest packlet-test-parse-body ()
   (should
    (equal
@@ -94,38 +99,42 @@
       (:commands command-a (command-b command-c))
       (:config (message "configured"))))))
 
-(ert-deftest packlet-test-run-file-cleanups-continues-after-error ()
-  (let ((file "/tmp/packlet-test-cleanup.el")
+(ert-deftest packlet-test-run-source-entry-cleanups-continues-after-error ()
+  (let ((scope '(:buffer cleanup-buffer))
         (calls nil)
         (warnings nil)
-        (fail-first t)
-        (packlet--file-cleanups (make-hash-table :test #'equal)))
-    (packlet--register-file-cleanup
-     file
-     (lambda ()
-       (setq calls (append calls '(:first)))))
-    (packlet--register-file-cleanup
-     file
-     (lambda ()
-       (if fail-first
-           (progn
-             (setq fail-first nil)
-             (error "boom"))
-         (setq calls (append calls '(:recovered))))))
-    (packlet--register-file-cleanup
-     file
-     (lambda ()
-       (setq calls (append calls '(:last)))))
+        (fail-first t))
     (cl-letf (((symbol-function 'display-warning)
                (lambda (_type message &optional _level)
                  (push message warnings))))
-      (packlet--run-file-cleanups file)
-      (should (equal calls '(:last :first)))
-      (should (= (length warnings) 1))
-      (should (= (length (gethash file packlet--file-cleanups)) 1))
-      (packlet--run-file-cleanups file)
-      (should (equal calls '(:last :first :recovered)))
-      (should-not (gethash file packlet--file-cleanups)))))
+      (let ((failed
+             (packlet--run-source-entry-cleanups
+              (list
+               (packlet--make-source-entry
+                :id 'first
+                :install #'ignore
+                :cleanup (lambda ()
+                           (setq calls (append calls '(:first)))))
+               (packlet--make-source-entry
+                :id 'second
+                :install #'ignore
+                :cleanup (lambda ()
+                           (if fail-first
+                               (progn
+                                 (setq fail-first nil)
+                                 (error "boom"))
+                             (setq calls (append calls '(:recovered))))))
+               (packlet--make-source-entry
+                :id 'third
+                :install #'ignore
+                :cleanup (lambda ()
+                           (setq calls (append calls '(:last))))))
+              scope)))
+        (should (equal calls '(:last :first)))
+        (should (= (length warnings) 1))
+        (should (= (length failed) 1))
+        (packlet--run-source-entry-cleanups failed scope)
+        (should (equal calls '(:last :first :recovered)))))))
 
 (ert-deftest packlet-test-command-autoload-and-config ()
   (let* ((directory (make-temp-file "packlet-test-" t))
@@ -527,6 +536,62 @@
         (should (= packlet-test-hook-count 10)))
     (setq packlet-test-hook-count nil)
     (packlet-test--cleanup-symbols '(packlet-test-nonfile-hook))))
+
+(ert-deftest packlet-test-kill-buffer-clears-nonfile-source-state ()
+  (defvar packlet-test-buffer-scope-hook nil)
+  (let ((buffer (generate-new-buffer " *packlet-test-buffer-scope*"))
+        scope)
+    (unwind-protect
+        (progn
+          (setq packlet-test-hook-count 0
+                packlet-test-buffer-scope-hook nil)
+          (with-current-buffer buffer
+            (emacs-lisp-mode)
+            (setq scope (list :buffer buffer))
+            (eval
+             '(packlet packlet-test-buffer-scope-feature
+                :hook ((packlet-test-buffer-scope-hook
+                        . (lambda ()
+                            (setq packlet-test-hook-count
+                                  (1+ packlet-test-hook-count))))))))
+          (should (gethash scope packlet--source-states))
+          (kill-buffer buffer)
+          (setq buffer nil)
+          (run-hooks 'packlet-test-buffer-scope-hook)
+          (should (= packlet-test-hook-count 0))
+          (should-not (gethash scope packlet--source-states)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (setq packlet-test-hook-count nil)
+      (packlet-test--cleanup-symbols '(packlet-test-buffer-scope-hook)))))
+
+(ert-deftest packlet-test-deep-nonfile-eval-detects-packlet ()
+  (defvar packlet-test-deep-eval-hook nil)
+  (unwind-protect
+      (with-temp-buffer
+        (emacs-lisp-mode)
+        (setq packlet-test-hook-count 0
+              packlet-test-deep-eval-hook nil)
+        (eval
+         (packlet-test--nest-progns
+          40
+          '(packlet packlet-test-deep-eval-feature
+             :hook ((packlet-test-deep-eval-hook
+                     . (lambda ()
+                         (setq packlet-test-hook-count
+                               (1+ packlet-test-hook-count))))))))
+        (eval
+         (packlet-test--nest-progns
+          40
+          '(packlet packlet-test-deep-eval-feature
+             :hook ((packlet-test-deep-eval-hook
+                     . (lambda ()
+                         (setq packlet-test-hook-count
+                               (+ packlet-test-hook-count 10))))))))
+        (run-hooks 'packlet-test-deep-eval-hook)
+        (should (= packlet-test-hook-count 10)))
+    (setq packlet-test-hook-count nil)
+    (packlet-test--cleanup-symbols '(packlet-test-deep-eval-hook))))
 
 (ert-deftest packlet-test-idle-load-waits-for-startup ()
   (let ((after-init-time nil)

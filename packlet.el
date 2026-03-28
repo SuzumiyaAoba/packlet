@@ -92,9 +92,6 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 (defvar packlet--idle-load-states (make-hash-table :test #'equal)
   "State for `:idle' loaders keyed by packlet expansion id.")
 
-(defvar packlet--file-cleanups (make-hash-table :test #'equal)
-  "Cleanup stacks for file-backed `packlet' evaluations.")
-
 (defvar packlet--expansion-load-states (make-hash-table :test #'equal)
   "Expansion state for file-backed `packlet' macro calls.")
 
@@ -159,6 +156,15 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
         (puthash scope entries packlet--source-states)
       (remhash scope packlet--source-states))))
 
+(defun packlet--cleanup-source-scope (scope &optional preserve-failed)
+  "Run cleanup for SOURCE SCOPE.
+When PRESERVE-FAILED is non-nil, keep failed entries registered."
+  (let* ((scope (packlet--normalize-source-scope scope))
+         (entries (packlet--source-entries scope))
+         (failed (packlet--run-source-entry-cleanups entries scope)))
+    (packlet--set-source-entries scope (and preserve-failed failed))
+    failed))
+
 (defun packlet--replace-source-entry (entries entry)
   "Return ENTRIES with ENTRY inserted or replaced by id."
   (let ((id (packlet--source-entry-id entry))
@@ -213,17 +219,24 @@ Return entries whose cleanup failed."
          (packlet--replace-source-entry (packlet--source-entries scope)
                                         entry))))))
 
-(defun packlet--form-contains-packlet-p (form &optional depth)
+(defun packlet--form-contains-packlet-p (form &optional seen)
   "Return non-nil when FORM appears to contain a `packlet' call."
-  (let ((depth (or depth 24)))
+  (let ((seen (or seen (make-hash-table :test #'eq))))
     (cond
-     ((<= depth 0) nil)
      ((symbolp form) (eq form 'packlet))
+     ((or (not form)
+          (numberp form)
+          (stringp form)
+          (keywordp form))
+      nil)
+     ((gethash form seen) nil)
      ((consp form)
+      (puthash form t seen)
       (or (eq (car form) 'packlet)
-          (packlet--form-contains-packlet-p (car form) (1- depth))
-          (packlet--form-contains-packlet-p (cdr form) (1- depth))))
-     ((vectorp form)
+          (packlet--form-contains-packlet-p (car form) seen)
+          (packlet--form-contains-packlet-p (cdr form) seen)))
+     ((or (vectorp form) (recordp form))
+      (puthash form t seen)
       (let ((index 0)
             found)
         (while (and (< index (length form))
@@ -231,7 +244,7 @@ Return entries whose cleanup failed."
           (setq found
                 (packlet--form-contains-packlet-p
                  (aref form index)
-                 (1- depth))
+                 seen)
                 index (1+ index)))
         found))
      (t nil))))
@@ -248,8 +261,7 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
               (and expansion-file
                    (gethash expansion-file packlet--expansion-load-states)))
              (old-cleanup-failures
-              (packlet--run-source-entry-cleanups old-entries scope)))
-        (packlet--set-source-entries scope nil)
+              (packlet--cleanup-source-scope scope t)))
         (when expansion-file
           (remhash expansion-file packlet--expansion-load-states))
         (let ((packlet--active-source-scope scope)
@@ -273,35 +285,6 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
                             packlet--expansion-load-states)
                  (remhash expansion-file packlet--expansion-load-states)))
              (signal (car err) (cdr err)))))))))
-
-(defun packlet--register-file-cleanup (file cleanup)
-  "Register CLEANUP to run before FILE is evaluated again."
-  (when file
-    (let ((file (expand-file-name file)))
-      (puthash file
-               (cons cleanup (gethash file packlet--file-cleanups))
-               packlet--file-cleanups))))
-
-(defun packlet--run-file-cleanups (file)
-  "Run registered cleanup functions for FILE in reverse registration order."
-  (when-let ((cleanups (gethash file packlet--file-cleanups)))
-    (remhash file packlet--file-cleanups)
-    (let (failed)
-      (dolist (cleanup cleanups)
-        (condition-case err
-            (funcall cleanup)
-          (error
-           (push cleanup failed)
-           (packlet--warn "Cleanup for `%s' failed: %S" file err))))
-      (when failed
-        (puthash file (nreverse failed) packlet--file-cleanups)))))
-
-(defun packlet--prepare-file-eval (file)
-  "Clear stale `packlet' registrations for FILE before reevaluation."
-  (when file
-    (let ((file (expand-file-name file)))
-      (packlet--run-file-cleanups file)
-      (remhash file packlet--expansion-load-states))))
 
 (defun packlet--eval-buffer-source-file (buffer filename)
   "Return the source file used by `eval-buffer' for BUFFER and FILENAME."
@@ -346,6 +329,11 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
      (lambda ()
        (funcall orig form lexical)))))
 
+(defun packlet--kill-buffer-hook ()
+  "Clean up `packlet' registrations owned by the current buffer."
+  (packlet--cleanup-source-scope
+   (packlet--normalize-source-scope (list :buffer (current-buffer)))))
+
 (unless (advice-member-p #'packlet--eval-buffer-advice 'eval-buffer)
   (advice-add 'eval-buffer :around #'packlet--eval-buffer-advice))
 
@@ -354,6 +342,9 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
 
 (unless (advice-member-p #'packlet--eval-advice 'eval)
   (advice-add 'eval :around #'packlet--eval-advice))
+
+(unless (member #'packlet--kill-buffer-hook kill-buffer-hook)
+  (add-hook 'kill-buffer-hook #'packlet--kill-buffer-hook))
 
 (defun packlet--autoloads-file (file)
   "Return the autoload library name for FILE."
@@ -587,9 +578,6 @@ Each PLIST may contain:
   :expand     Function taking (CONTEXT FORMS) and returning a list of
               Lisp forms to splice into the expansion.  CONTEXT is a
               plist with :feature, :file, :afters, and :sections.")
-
-  (defvar packlet--expansion-load-states (make-hash-table :test #'equal)
-    "Expansion state for file-backed `packlet' macro calls.")
 
   (defun packlet--keyword-p (form)
     "Return non-nil when FORM is a supported `packlet' keyword."
