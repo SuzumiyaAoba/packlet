@@ -86,6 +86,8 @@ Clone this repository and add it to `load-path`:
   a feature across source scopes.
 - `packlet-explain-feature` shows the current runtime state for a feature,
   including pending `:after`, `:config`, `:demand`, and `:idle` status.
+- `packlet-list-features` lists the features currently registered through
+  `packlet`.
 - `packlet-cleanup-source` removes the registrations currently owned by a file
   or buffer scope.
 
@@ -128,9 +130,9 @@ Clone this repository and add it to `load-path`:
   `(some-hook . some-function)` pairs added with `add-hook`.
   You can also use `(some-hook some-function delay)` to run the function from
   an idle timer after the hook fires. List-style entries additionally accept
-  `:append t` and `:depth N`, for example
+  `:append t`, `:depth N`, and `:local t`, for example
   `(some-hook some-function :append t)` or
-  `(some-hook some-function delay :depth -10)`.
+  `(some-hook some-function delay :depth -10 :local t)`.
 - `:bind`
   Global key bindings such as `("C-c p" . some-command)` or keymap groups such
   as `(:map some-mode-map ("C-c p" . some-command))`.

@@ -118,10 +118,10 @@
     (packlet--normalize-hooks
      '((packlet-test-hook-a . ignore)
        (packlet-test-hook-b ignore :append t)
-       (packlet-test-hook-c ignore 0.5 :depth -10)))
-    '((:hook packlet-test-hook-a :function ignore :delay nil :depth 0)
-      (:hook packlet-test-hook-b :function ignore :delay nil :depth 90)
-      (:hook packlet-test-hook-c :function ignore :delay 0.5 :depth -10)))))
+       (packlet-test-hook-c ignore 0.5 :depth -10 :local t)))
+    '((:hook packlet-test-hook-a :function ignore :delay nil :depth 0 :local nil)
+      (:hook packlet-test-hook-b :function ignore :delay nil :depth 90 :local nil)
+      (:hook packlet-test-hook-c :function ignore :delay 0.5 :depth -10 :local t)))))
 
 (ert-deftest packlet-test-run-source-entry-cleanups-continues-after-error ()
   (let ((scope '(:buffer cleanup-buffer))
@@ -892,6 +892,35 @@
           (goto-char (point-min))
           (eval-buffer)))
       (packlet-test--cleanup-symbols '(packlet-test-describe-feature-hook))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-list-features-shows-registered-features ()
+  (let ((source-file (make-temp-file "packlet-test-list-features-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-list-feature-a\n\
+  :setq (packlet-test-tracked-setq 1))\n\
+\n\
+(packlet packlet-test-list-feature-b\n\
+  :config nil)\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (let ((description (packlet-list-features)))
+            (should (string-match-p "Features: 2" description))
+            (should (string-match-p "packlet-test-list-feature-a" description))
+            (should (string-match-p "packlet-test-list-feature-b" description))
+            (should (string-match-p "sources=1" description))))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
@@ -1953,6 +1982,35 @@
           (run-hooks 'packlet-test-order-hook)
           (should (equal result '(first middle last))))
       (setq packlet-test-order-hook nil))))
+
+(ert-deftest packlet-test-hook-local-stays-buffer-local ()
+  (defvar packlet-test-local-hook nil)
+  (let ((buffer-a (generate-new-buffer " *packlet-local-a*"))
+        (buffer-b (generate-new-buffer " *packlet-local-b*")))
+    (unwind-protect
+        (progn
+          (setq packlet-test-hook-count 0
+                packlet-test-local-hook nil)
+          (with-current-buffer buffer-a
+            (emacs-lisp-mode)
+            (eval
+             '(packlet packlet-test-local-hook-feature
+                :hook ((packlet-test-local-hook
+                        (lambda ()
+                          (setq packlet-test-hook-count
+                                (1+ packlet-test-hook-count)))
+                        :local t)))))
+          (with-current-buffer buffer-a
+            (run-hooks 'packlet-test-local-hook))
+          (with-current-buffer buffer-b
+            (run-hooks 'packlet-test-local-hook))
+          (should (= packlet-test-hook-count 1)))
+      (when (buffer-live-p buffer-a)
+        (kill-buffer buffer-a))
+      (when (buffer-live-p buffer-b)
+        (kill-buffer buffer-b))
+      (setq packlet-test-hook-count nil)
+      (packlet-test--cleanup-symbols '(packlet-test-local-hook)))))
 
 (ert-deftest packlet-test-hook-reeval-does-not-duplicate ()
   (defvar packlet-test-reeval-hook nil)

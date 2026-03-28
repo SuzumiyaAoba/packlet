@@ -433,18 +433,28 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
        (princ description)))
     description))
 
+(defun packlet--registered-features ()
+  "Return registered packlet features sorted by name."
+  (sort
+   (delete-dups
+    (let (result)
+      (maphash
+       (lambda (_site metadata)
+         (when-let ((feature (plist-get metadata :feature)))
+           (push feature result)))
+       packlet--site-features)
+      result))
+   (lambda (left right)
+     (string-lessp (symbol-name left)
+                   (symbol-name right)))))
+
 (defun packlet--read-feature-name ()
   "Read a feature name for interactive packlet commands."
   (let* ((registered
           (delete-dups
            (append
-            (let (result)
-              (maphash
-               (lambda (_site metadata)
-                 (when-let ((feature (plist-get metadata :feature)))
-                   (push (symbol-name feature) result)))
-               packlet--site-features)
-              result)
+            (mapcar #'symbol-name
+                    (packlet--registered-features))
             (mapcar #'symbol-name features))))
          (default (car registered)))
     (intern
@@ -458,6 +468,32 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
       nil
       nil
       default))))
+
+(defun packlet--list-features-string ()
+  "Return a textual listing of registered `packlet' features."
+  (let ((features (packlet--registered-features)))
+    (concat
+     (format "Features: %d\n" (length features))
+     (if features
+         (mapconcat
+          (lambda (feature)
+            (format "- %s loaded=%s sources=%d"
+                    feature
+                    (if (featurep feature) "yes" "no")
+                    (length (packlet--feature-source-groups feature))))
+          features
+          "\n")
+       "- none"))))
+
+;;;###autoload
+(defun packlet-list-features ()
+  "List registered `packlet' features."
+  (interactive)
+  (let ((description (packlet--list-features-string)))
+    (when (called-interactively-p 'interactive)
+      (with-help-window (help-buffer)
+        (princ description)))
+    description))
 
 (defun packlet--describe-feature-string (feature)
   "Return a textual description of `packlet' FEATURE registrations."
@@ -1253,7 +1289,7 @@ Each PLIST may contain:
 
   (defun packlet--normalize-hook-options (options)
     "Normalize `:hook' OPTIONS into a plist."
-    (let (append depth)
+    (let (append depth local)
       (while options
         (let ((key (pop options)))
           (unless (keywordp key)
@@ -1272,10 +1308,16 @@ Each PLIST may contain:
                  (error "packlet: :depth for :hook must be a number, got %S"
                         value))
                (setq depth value))
+              (:local
+               (unless (memq value '(nil t))
+                 (error "packlet: :local for :hook must be nil or t, got %S"
+                        value))
+               (setq local value))
               (_
                (error "packlet: unsupported hook option %S" key))))))
       (list :depth (or depth
-                       (if append 90 0)))))
+                       (if append 90 0))
+            :local local)))
 
   (defun packlet--normalize-hook-entry (value)
     "Normalize a single `:hook' VALUE into a plist."
@@ -1284,7 +1326,8 @@ Each PLIST may contain:
       (list :hook (car value)
             :function (cdr value)
             :delay nil
-            :depth 0))
+            :depth 0
+            :local nil))
      ((packlet--proper-list-p value)
       (let ((hook (car value))
             (rest (cdr value))
@@ -1363,7 +1406,7 @@ DELAY must be a non-negative number."
 
   (defun packlet--normalize-hooks (forms)
     "Normalize FORMS under `:hook' into a flat list of hook entries.
-Each entry becomes a plist with :hook, :function, :delay, and :depth."
+Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
     (let (result)
       (dolist (form forms)
         (cond
@@ -1827,12 +1870,20 @@ Example:
                  (function (plist-get hook :function))
                  (delay (plist-get hook :delay))
                  (depth (plist-get hook :depth))
+                 (local (plist-get hook :local))
                  (hook-function
                   (packlet--generated-symbol
                    "packlet--hook"
                    feature
                    site
-                   (format "hook-%d" index))))
+                   (format "hook-%d" index)))
+                 (hook-buffer-var
+                  (and local
+                       (packlet--generated-symbol
+                        "packlet--hook-buffer"
+                        feature
+                        site
+                        (format "hook-%d" index)))))
             (if delay
                 (let ((timer-var
                        (packlet--generated-symbol
@@ -1841,12 +1892,16 @@ Example:
                         site
                         (format "hook-%d" index))))
                   `((defvar ,timer-var nil)
+                    ,@(when local
+                        `((defvar ,hook-buffer-var nil)))
                     ,@(when (symbolp function)
                         `((packlet--maybe-autoload ',function ,file nil)))
                     (packlet--register-source-entry
                      ',source-scope
                      ',(list site :hook index)
                      (lambda ()
+                       ,@(when local
+                           `((setq ,hook-buffer-var (current-buffer))))
                        (when (timerp ,timer-var)
                          (cancel-timer ,timer-var)
                          (setq ,timer-var nil))
@@ -1860,28 +1915,54 @@ Example:
                                   (lambda ()
                                     (setq ,timer-var nil)
                                     (funcall ,(packlet--hook-function-form function)))))))
-                       (add-hook ',hook-var ',hook-function ,depth))
+                       ,(if local
+                            `(when (buffer-live-p ,hook-buffer-var)
+                               (with-current-buffer ,hook-buffer-var
+                                 (add-hook ',hook-var ',hook-function ,depth t)))
+                          `(add-hook ',hook-var ',hook-function ,depth)))
                      (lambda ()
-                       (remove-hook ',hook-var ',hook-function)
+                       ,(if local
+                            `(when (buffer-live-p ,hook-buffer-var)
+                               (with-current-buffer ,hook-buffer-var
+                                 (remove-hook ',hook-var ',hook-function t)))
+                          `(remove-hook ',hook-var ',hook-function))
                        (when (boundp ',timer-var)
                          (when (timerp ,timer-var)
                            (cancel-timer ,timer-var))
                          (makunbound ',timer-var))
+                       ,@(when local
+                           `((when (boundp ',hook-buffer-var)
+                               (makunbound ',hook-buffer-var))))
                        (when (fboundp ',hook-function)
                          (fmakunbound ',hook-function))))))
               `((progn
+                  ,@(when local
+                      `((defvar ,hook-buffer-var nil)))
                   ,@(when (symbolp function)
                       `((packlet--maybe-autoload ',function ,file nil)))
                   (packlet--register-source-entry
                    ',source-scope
                    ',(list site :hook index)
                    (lambda ()
+                     ,@(when local
+                         `((setq ,hook-buffer-var (current-buffer))))
                      (defalias ',hook-function
                        (lambda ()
                          (funcall ,(packlet--hook-function-form function))))
-                     (add-hook ',hook-var ',hook-function ,depth))
+                     ,(if local
+                          `(when (buffer-live-p ,hook-buffer-var)
+                             (with-current-buffer ,hook-buffer-var
+                               (add-hook ',hook-var ',hook-function ,depth t)))
+                        `(add-hook ',hook-var ',hook-function ,depth)))
                    (lambda ()
-                     (remove-hook ',hook-var ',hook-function)
+                     ,(if local
+                          `(when (buffer-live-p ,hook-buffer-var)
+                             (with-current-buffer ,hook-buffer-var
+                               (remove-hook ',hook-var ',hook-function t)))
+                        `(remove-hook ',hook-var ',hook-function))
+                     ,@(when local
+                         `((when (boundp ',hook-buffer-var)
+                             (makunbound ',hook-buffer-var))))
                      (when (fboundp ',hook-function)
                        (fmakunbound ',hook-function)))))))))
        ,@(cl-loop
