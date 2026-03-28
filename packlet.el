@@ -77,7 +77,7 @@ autoloads when they become available later in the session."
 Each value is a list of (ID . FUNCTION) entries in registration order.")
 
 (defvar packlet--after-load-dispatchers (make-hash-table :test #'eq)
-  "Features whose after-load dispatcher is already installed.")
+  "Dispatcher forms registered in `after-load-alist' by feature.")
 
 (cl-defstruct (packlet--idle-state
                (:constructor packlet--make-idle-state))
@@ -178,6 +178,35 @@ When PRESERVE-FAILED is non-nil, keep failed entries registered."
          (failed (packlet--run-source-entry-cleanups entries scope)))
     (packlet--set-source-entries scope (and preserve-failed failed))
     failed))
+
+(defun packlet--merge-source-entry-pair (older newer)
+  "Return a merged source entry from OLDER and NEWER.
+The merged install reinstalls OLDER before NEWER, while cleanup runs
+NEWER before OLDER."
+  (packlet--make-source-entry
+   :id (packlet--source-entry-id newer)
+   :install (lambda ()
+              (funcall (packlet--source-entry-install older))
+              (funcall (packlet--source-entry-install newer)))
+   :cleanup (lambda ()
+              (funcall (packlet--source-entry-cleanup newer))
+              (funcall (packlet--source-entry-cleanup older)))))
+
+(defun packlet--merge-source-entry-lists (entries additions)
+  "Merge ADDITIONS into ENTRIES, coalescing identical ids."
+  (let ((result (copy-sequence entries)))
+    (dolist (entry additions)
+      (let* ((id (packlet--source-entry-id entry))
+             (existing (cl-find id result
+                                :key #'packlet--source-entry-id
+                                :test #'equal)))
+        (if existing
+            (setq result
+                  (packlet--replace-source-entry
+                   result
+                   (packlet--merge-source-entry-pair existing entry)))
+          (setq result (append result (list entry))))))
+    result))
 
 (defun packlet--replace-source-entry (entries entry)
   "Return ENTRIES with ENTRY inserted or replaced by id."
@@ -284,7 +313,9 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
               (let ((result (funcall thunk)))
                 (packlet--set-source-entries
                  scope
-                 (append old-cleanup-failures packlet--pending-source-entries))
+                 (packlet--merge-source-entry-lists
+                  old-cleanup-failures
+                  packlet--pending-source-entries))
                 result)
             (error
              (packlet--run-source-entry-cleanups
@@ -396,6 +427,28 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
   "Return ordered handler entries for watched FEATURE."
   (gethash feature packlet--after-load-handlers))
 
+(defun packlet--register-after-load-dispatcher (feature)
+  "Ensure FEATURE has a dispatcher registered in `after-load-alist'."
+  (unless (gethash feature packlet--after-load-dispatchers)
+    (let* ((existing (cdr (assq feature after-load-alist)))
+           (existing-count (length existing)))
+      (eval-after-load feature
+        `(packlet--run-after-load-handlers ',feature))
+      (when-let ((entry (assq feature after-load-alist))
+                 (dispatcher (nth existing-count (cdr entry))))
+        (puthash feature dispatcher packlet--after-load-dispatchers)))))
+
+(defun packlet--unregister-after-load-dispatcher (feature)
+  "Remove FEATURE's dispatcher form from `after-load-alist'."
+  (when-let ((dispatcher-form (gethash feature packlet--after-load-dispatchers)))
+    (if-let ((entry (assq feature after-load-alist)))
+        (let ((remaining (delq dispatcher-form (cdr entry))))
+          (if remaining
+              (setcdr entry remaining)
+            (setq after-load-alist
+                  (assq-delete-all feature after-load-alist)))))
+    (remhash feature packlet--after-load-dispatchers)))
+
 (defun packlet--unregister-after-load-handler (feature id)
   "Remove the handler registered under ID for FEATURE."
   (when-let ((entries (packlet--after-load-handler-entries feature)))
@@ -403,7 +456,7 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
     (if entries
         (puthash feature entries packlet--after-load-handlers)
       (remhash feature packlet--after-load-handlers)
-      (remhash feature packlet--after-load-dispatchers))))
+      (packlet--unregister-after-load-dispatcher feature))))
 
 (defun packlet--run-after-load-handlers (feature)
   "Run registered handlers for watched FEATURE."
@@ -423,10 +476,7 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
            (setcdr cell function)
          (setq entries (append entries (list (cons id function)))))
        (puthash feature entries packlet--after-load-handlers))
-     (unless (gethash feature packlet--after-load-dispatchers)
-       (puthash feature t packlet--after-load-dispatchers)
-       (with-eval-after-load feature
-         (packlet--run-after-load-handlers feature)))
+     (packlet--register-after-load-dispatcher feature)
      (when (featurep feature)
        (funcall function)))
    (lambda ()

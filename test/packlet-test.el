@@ -164,6 +164,44 @@
                              (packlet--source-entries scope))
                      '(stale fresh))))))
 
+(ert-deftest packlet-test-source-session-merges-failed-and-new-entry-with-same-id ()
+  (let ((scope '(:buffer merge-same-buffer))
+        (cleanup-calls nil)
+        (warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &optional _level)
+                 (push message warnings))))
+      (packlet--set-source-entries
+       scope
+       (list
+        (packlet--make-source-entry
+         :id 'same
+         :install #'ignore
+         :cleanup (lambda ()
+                    (push :old cleanup-calls)
+                    (error "boom")))))
+      (packlet--with-source-session
+       scope
+       nil
+       (lambda ()
+         (packlet--register-source-entry
+          scope
+          'same
+          #'ignore
+          (lambda ()
+            (push :new cleanup-calls)))))
+      (should (= (length warnings) 1))
+      (should (equal (mapcar #'packlet--source-entry-id
+                             (packlet--source-entries scope))
+                     '(same)))
+      (setq cleanup-calls nil)
+      (let ((failed
+             (packlet--run-source-entry-cleanups
+              (packlet--source-entries scope)
+              scope)))
+        (should (equal cleanup-calls '(:old :new)))
+        (should (= (length failed) 1))))))
+
 (ert-deftest packlet-test-command-autoload-and-config ()
   (let* ((directory (make-temp-file "packlet-test-" t))
          (load-path (cons directory load-path))
@@ -620,6 +658,34 @@
         (should (= packlet-test-hook-count 10)))
     (setq packlet-test-hook-count nil)
     (packlet-test--cleanup-symbols '(packlet-test-deep-eval-hook))))
+
+(ert-deftest packlet-test-deep-nonfile-eval-detects-packlet-in-non-lisp-buffer ()
+  (defvar packlet-test-deep-nonlisp-hook nil)
+  (unwind-protect
+      (with-temp-buffer
+        (fundamental-mode)
+        (setq packlet-test-hook-count 0
+              packlet-test-deep-nonlisp-hook nil)
+        (eval
+         (packlet-test--nest-progns
+          5
+          '(packlet packlet-test-deep-nonlisp-feature
+             :hook ((packlet-test-deep-nonlisp-hook
+                     . (lambda ()
+                         (setq packlet-test-hook-count
+                               (1+ packlet-test-hook-count))))))))
+        (eval
+         (packlet-test--nest-progns
+          5
+          '(packlet packlet-test-deep-nonlisp-feature
+             :hook ((packlet-test-deep-nonlisp-hook
+                     . (lambda ()
+                         (setq packlet-test-hook-count
+                               (+ packlet-test-hook-count 10))))))))
+        (run-hooks 'packlet-test-deep-nonlisp-hook)
+        (should (= packlet-test-hook-count 10)))
+    (setq packlet-test-hook-count nil)
+    (packlet-test--cleanup-symbols '(packlet-test-deep-nonlisp-hook))))
 
 (ert-deftest packlet-test-idle-load-waits-for-startup ()
   (let ((after-init-time nil)
@@ -1115,6 +1181,7 @@
   (let ((feature 'packlet-test-dispatcher-clear))
     (unwind-protect
         (progn
+          (setq after-load-alist nil)
           (clrhash packlet--after-load-handlers)
           (clrhash packlet--after-load-dispatchers)
           (packlet--register-after-load-handler
@@ -1123,11 +1190,14 @@
            #'ignore)
           (should (gethash feature packlet--after-load-dispatchers))
           (should (packlet--after-load-handler-entries feature))
+          (should (assq feature after-load-alist))
           (packlet--unregister-after-load-handler feature 'first)
           (should-not (packlet--after-load-handler-entries feature))
-          (should-not (gethash feature packlet--after-load-dispatchers)))
+          (should-not (gethash feature packlet--after-load-dispatchers))
+          (should-not (assq feature after-load-alist)))
       (clrhash packlet--after-load-handlers)
-      (clrhash packlet--after-load-dispatchers))))
+      (clrhash packlet--after-load-dispatchers)
+      (setq after-load-alist nil))))
 
 (ert-deftest packlet-test-user-defined-keyword ()
   (defvar packlet-test-user-kw-result nil)

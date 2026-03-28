@@ -11,7 +11,7 @@ It focuses on the common parts of package configuration:
 - deferring configuration until a feature is actually loaded
 - warming up a feature after startup during idle time
 - optionally demanding a feature once its dependencies are ready
-- re-evaluating `packlet` forms without stacking duplicate config or hook handlers
+- re-evaluating `packlet` forms transactionally without stacking stale handlers
 - declaring external functions and variables for byte compilation
 
 It does not install packages by itself. `packlet` only describes when and how
@@ -60,6 +60,21 @@ Clone this repository and add it to `load-path`:
    #'magit-display-buffer-same-window-except-diff-v1))
 ```
 
+## Reevaluation
+
+`packlet` treats reevaluation as a first-class workflow.
+
+- Re-evaluating a file with `eval-buffer` or `load-file` replaces old
+  `:config`, `:hook`, `:bind`, `:mode`, `:after-load`, `:idle`, and `:demand`
+  registrations from that source instead of stacking duplicates.
+- File-backed reevaluation is transactional. If the new evaluation fails part
+  way through, `packlet` restores the previously working registrations.
+- Direct `eval` is also tracked. In Lisp buffers, nested forms containing
+  `packlet` are detected. In non-Lisp buffers, top-level `packlet` forms are
+  tracked.
+- Non-file `eval` registrations are scoped to the current buffer and are
+  cleaned up automatically when that buffer is killed.
+
 ## Keywords
 
 - `:file`
@@ -67,6 +82,8 @@ Clone this repository and add it to `load-path`:
   loading. By default this is the same as the feature symbol.
 - `:init`
   Forms evaluated immediately.
+- `:setq`
+  `(variable value)` forms applied immediately with `setq`.
 - `:custom`
   `(variable value)` forms applied immediately with `setopt`.
 - `:load`
@@ -87,12 +104,17 @@ Clone this repository and add it to `load-path`:
   `("\\\\.ext\\\\'" . some-mode)` pairs added to `auto-mode-alist`.
 - `:hook`
   `(some-hook . some-function)` pairs added with `add-hook`.
+  You can also use `(some-hook some-function delay)` to run the function from
+  an idle timer after the hook fires.
 - `:bind`
   Global key bindings such as `("C-c p" . some-command)` or keymap groups such
   as `(:map some-mode-map ("C-c p" . some-command))`.
 - `:after`
   Feature symbols that must be loaded before `:config` or `:demand` becomes
   active.
+- `:after-load`
+  `(feature body...)` forms evaluated after an arbitrary feature loads, even if
+  it is not the package feature being configured.
 - `:idle`
   Require the feature after startup on the next idle period. With no value,
   this defaults to `1.0`. A numeric value changes the idle delay in seconds.
