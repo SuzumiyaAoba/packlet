@@ -73,7 +73,8 @@ autoloads when they become available later in the session."
   "Autoload libraries that `packlet' has already loaded successfully.")
 
 (defvar packlet--after-load-handlers (make-hash-table :test #'eq)
-  "Registered after-load handlers keyed by watched feature.")
+  "Registered after-load handlers keyed by watched feature.
+Each value is a list of (ID . FUNCTION) entries in registration order.")
 
 (defvar packlet--after-load-dispatchers (make-hash-table :test #'eq)
   "Features whose after-load dispatcher is already installed.")
@@ -116,8 +117,15 @@ autoloads when they become available later in the session."
   "Run registered cleanup functions for FILE in reverse registration order."
   (when-let ((cleanups (gethash file packlet--file-cleanups)))
     (remhash file packlet--file-cleanups)
-    (dolist (cleanup cleanups)
-      (funcall cleanup))))
+    (let (failed)
+      (dolist (cleanup cleanups)
+        (condition-case err
+            (funcall cleanup)
+          (error
+           (push cleanup failed)
+           (packlet--warn "Cleanup for `%s' failed: %S" file err))))
+      (when failed
+        (puthash file (nreverse failed) packlet--file-cleanups)))))
 
 (defun packlet--prepare-file-eval (file)
   "Clear stale `packlet' registrations for FILE before reevaluation."
@@ -183,32 +191,32 @@ autoloads when they become available later in the session."
         (prog1 nil
           (packlet--warn "Could not require feature `%s'" feature)))))
 
-(defun packlet--after-load-handler-table (feature)
-  "Return the handler table for watched FEATURE."
-  (or (gethash feature packlet--after-load-handlers)
-      (let ((table (make-hash-table :test #'equal)))
-        (puthash feature table packlet--after-load-handlers)
-        table)))
+(defun packlet--after-load-handler-entries (feature)
+  "Return ordered handler entries for watched FEATURE."
+  (gethash feature packlet--after-load-handlers))
 
 (defun packlet--unregister-after-load-handler (feature id)
   "Remove the handler registered under ID for FEATURE."
-  (when-let ((table (gethash feature packlet--after-load-handlers)))
-    (remhash id table)
-    (when (= (hash-table-count table) 0)
+  (when-let ((entries (packlet--after-load-handler-entries feature)))
+    (setq entries (cl-remove id entries :key #'car :test #'equal))
+    (if entries
+        (puthash feature entries packlet--after-load-handlers)
       (remhash feature packlet--after-load-handlers))))
 
 (defun packlet--run-after-load-handlers (feature)
   "Run registered handlers for watched FEATURE."
-  (when-let ((table (gethash feature packlet--after-load-handlers)))
-    (maphash
-     (lambda (_id function)
-       (funcall function))
-     table)))
+  (dolist (entry (copy-sequence (packlet--after-load-handler-entries feature)))
+    (funcall (cdr entry))))
 
 (defun packlet--register-after-load-handler (feature id function
                                                      &optional source-file)
   "Register FUNCTION under ID for watched FEATURE."
-  (puthash id function (packlet--after-load-handler-table feature))
+  (let* ((entries (copy-sequence (packlet--after-load-handler-entries feature)))
+         (cell (assoc id entries)))
+    (if cell
+        (setcdr cell function)
+      (setq entries (append entries (list (cons id function)))))
+    (puthash feature entries packlet--after-load-handlers))
   (packlet--register-file-cleanup
    source-file
    (lambda ()
@@ -351,7 +359,8 @@ ID identifies the current `packlet' expansion."
      source-file
      (lambda ()
        (when installed-map
-         (define-key installed-map key previous-binding)
+         (when (eq (lookup-key installed-map key) command)
+           (define-key installed-map key previous-binding))
          (setq installed-map nil
                previous-binding nil))))
     (let ((install
@@ -998,11 +1007,19 @@ Example:
           for binding in bindings
           for index from 0
           collect
-          (let ((binding-id (list site :bind index)))
+          (let ((binding-id (list site :bind index))
+                (previous-binding-var
+                 (packlet--generated-symbol
+                  "packlet--previous-binding"
+                  feature
+                  site
+                  (format "bind-%d" index))))
             (pcase binding
               (`(:global ,key ,command)
-               `(let ((previous-binding
-                       (lookup-key global-map ,(packlet--key-form key))))
+               `(progn
+                  (defvar ,previous-binding-var nil)
+                  (setq ,previous-binding-var
+                        (lookup-key global-map ,(packlet--key-form key)))
                   (packlet--maybe-autoload ',command ,file t)
                   (global-set-key
                    ,(packlet--key-form key)
@@ -1010,9 +1027,13 @@ Example:
                   (packlet--register-file-cleanup
                    ,source-file
                    (lambda ()
-                     (define-key global-map
-                                 ,(packlet--key-form key)
-                                 previous-binding)))))
+                     (when (eq (lookup-key global-map ,(packlet--key-form key))
+                               ',command)
+                       (define-key global-map
+                                   ,(packlet--key-form key)
+                                   ,previous-binding-var))
+                     (when (boundp ',previous-binding-var)
+                       (makunbound ',previous-binding-var))))))
               (`(:map ,keymap ,key ,command)
                `(progn
                   (packlet--maybe-autoload ',command ,file t)

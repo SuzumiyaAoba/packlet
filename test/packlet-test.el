@@ -94,6 +94,39 @@
       (:commands command-a (command-b command-c))
       (:config (message "configured"))))))
 
+(ert-deftest packlet-test-run-file-cleanups-continues-after-error ()
+  (let ((file "/tmp/packlet-test-cleanup.el")
+        (calls nil)
+        (warnings nil)
+        (fail-first t)
+        (packlet--file-cleanups (make-hash-table :test #'equal)))
+    (packlet--register-file-cleanup
+     file
+     (lambda ()
+       (setq calls (append calls '(:first)))))
+    (packlet--register-file-cleanup
+     file
+     (lambda ()
+       (if fail-first
+           (progn
+             (setq fail-first nil)
+             (error "boom"))
+         (setq calls (append calls '(:recovered))))))
+    (packlet--register-file-cleanup
+     file
+     (lambda ()
+       (setq calls (append calls '(:last)))))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &optional _level)
+                 (push message warnings))))
+      (packlet--run-file-cleanups file)
+      (should (equal calls '(:last :first)))
+      (should (= (length warnings) 1))
+      (should (= (length (gethash file packlet--file-cleanups)) 1))
+      (packlet--run-file-cleanups file)
+      (should (equal calls '(:last :first :recovered)))
+      (should-not (gethash file packlet--file-cleanups)))))
+
 (ert-deftest packlet-test-command-autoload-and-config ()
   (let* ((directory (make-temp-file "packlet-test-" t))
          (load-path (cons directory load-path))
@@ -237,6 +270,29 @@
           (should config-a-ran)
           (should config-b-ran))
       (packlet-test--cleanup-feature 'packlet-test-shared-config)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-config-handlers-run-in-registration-order ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-config-order)
+         (result nil))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-config-order-loaded t)")
+          (packlet packlet-test-config-order
+            :config
+            (setq result (append result '(a))))
+          (packlet packlet-test-config-order
+            :config
+            (setq result (append result '(b))))
+          (require feature)
+          (should (equal result '(a b))))
+      (packlet-test--cleanup-feature feature)
       (delete-directory directory t))))
 
 (ert-deftest packlet-test-config-reeval-does-not-duplicate ()
@@ -1094,6 +1150,36 @@
       (setq packlet-test-hook-count nil)
       (packlet-test--cleanup-symbols
        '(packlet-test-reeval-hook-a packlet-test-reeval-hook-b))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-bind-reeval-after-removal-preserves-later-global-binding ()
+  (let* ((source-file (make-temp-file "packlet-test-bind-remove-" nil ".el"))
+         (key (kbd "C-c z"))
+         (old-binding (lookup-key global-map key)))
+    (unwind-protect
+        (progn
+          (if old-binding
+              (global-set-key key old-binding)
+            (global-unset-key key))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-bind-remove-feature\n\
+  :bind (\"C-c z\" . ignore))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (global-set-key key 'forward-char)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (eq (lookup-key global-map key) 'forward-char)))
+      (if old-binding
+          (global-set-key key old-binding)
+        (global-unset-key key))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
