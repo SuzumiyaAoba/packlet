@@ -95,6 +95,9 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 (defvar packlet--expansion-load-states (make-hash-table :test #'equal)
   "Expansion state for file-backed `packlet' macro calls.")
 
+(defvar packlet--site-features (make-hash-table :test #'equal)
+  "Feature metadata keyed by packlet expansion site.")
+
 (cl-defstruct (packlet--source-entry
                (:constructor packlet--make-source-entry))
   id
@@ -302,6 +305,8 @@ Return entries whose cleanup failed."
   "Return a short kind label for source ENTRY."
   (let ((id (packlet--source-entry-id entry)))
     (pcase id
+      (`(:site-feature ,_ ,_)
+       :site-feature)
       (`(:after-load ,_ ,_)
        :after-load-handler)
       (`(:idle ,_)
@@ -315,10 +320,89 @@ Return entries whose cleanup failed."
       (_
        :entry))))
 
+(defun packlet--source-entry-visible-p (entry)
+  "Return non-nil when source ENTRY should be shown in user-facing output."
+  (not (eq (packlet--source-entry-kind entry) :site-feature)))
+
+(defun packlet--display-source-entries (entries)
+  "Return user-visible ENTRIES from source ENTRIES."
+  (cl-remove-if-not #'packlet--source-entry-visible-p entries))
+
+(defun packlet--entry-site-p (value)
+  "Return non-nil when VALUE looks like a packlet expansion site."
+  (pcase value
+    (`(load ,_ ,_) t)
+    (`(eval ,_ ,_ ,_) t)
+    (_ nil)))
+
+(defun packlet--find-entry-site (value)
+  "Return the expansion site nested inside VALUE, or nil when absent."
+  (cond
+   ((packlet--entry-site-p value)
+    value)
+   ((consp value)
+    (or (packlet--find-entry-site (car value))
+        (packlet--find-entry-site (cdr value))))
+   ((vectorp value)
+    (let ((index 0)
+          site)
+      (while (and (< index (length value))
+                  (not site))
+        (setq site (packlet--find-entry-site (aref value index))
+              index (1+ index)))
+      site))
+   (t nil)))
+
+(defun packlet--site-feature (site)
+  "Return the feature associated with expansion SITE."
+  (pcase site
+    (`(eval ,_ ,feature ,_)
+     feature)
+    (`(load ,_ ,_)
+     (gethash site packlet--site-features))
+    (_
+     nil)))
+
+(defun packlet--source-entry-feature (entry)
+  "Return the configured feature associated with source ENTRY."
+  (when-let ((site (packlet--find-entry-site (packlet--source-entry-id entry))))
+    (packlet--site-feature site)))
+
+(defun packlet--all-source-groups ()
+  "Return all registered source groups as (SCOPE . ENTRIES)."
+  (let (groups)
+    (maphash
+     (lambda (scope entries)
+       (push (cons scope (copy-sequence entries)) groups))
+     packlet--file-source-states)
+    (maphash
+     (lambda (buffer entries)
+       (push (cons (list :buffer buffer) (copy-sequence entries)) groups))
+     packlet--buffer-source-states)
+    (sort groups
+          (lambda (left right)
+            (string-lessp (packlet--source-scope-name (car left))
+                          (packlet--source-scope-name (car right)))))))
+
+(defun packlet--feature-source-groups (feature)
+  "Return source groups that register FEATURE."
+  (let (groups)
+    (dolist (group (packlet--all-source-groups))
+      (let ((entries
+             (cl-remove-if-not
+              (lambda (entry)
+                (and (packlet--source-entry-visible-p entry)
+                     (eq (packlet--source-entry-feature entry) feature)))
+              (cdr group))))
+        (when entries
+          (push (cons (car group) entries) groups))))
+    (nreverse groups)))
+
 (defun packlet--describe-source-string (source)
   "Return a textual description of `packlet' SOURCE registrations."
   (let* ((scope (packlet--resolve-source-scope source))
-         (entries (packlet--source-entries scope)))
+         (entries (packlet--display-source-entries
+                   (packlet--source-entries scope))))
     (concat
      (packlet--source-scope-name scope)
      "\n"
@@ -342,6 +426,69 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
     (when (called-interactively-p 'interactive)
       (with-help-window (help-buffer)
        (princ description)))
+    description))
+
+(defun packlet--read-feature-name ()
+  "Read a feature name for interactive packlet commands."
+  (let* ((registered
+          (delete-dups
+           (append
+            (let (result)
+              (maphash
+               (lambda (_site feature)
+                 (push (symbol-name feature) result))
+               packlet--site-features)
+              result)
+            (mapcar #'symbol-name features))))
+         (default (car registered)))
+    (intern
+     (completing-read
+      (if default
+          (format "Feature (default %s): " default)
+        "Feature: ")
+      registered
+      nil
+      nil
+      nil
+      nil
+      default))))
+
+(defun packlet--describe-feature-string (feature)
+  "Return a textual description of `packlet' FEATURE registrations."
+  (let* ((groups (packlet--feature-source-groups feature))
+         (sections
+          (mapcar
+           (lambda (group)
+             (concat
+              (packlet--source-scope-name (car group))
+              "\n"
+              (format "Entries: %d\n" (length (cdr group)))
+              (mapconcat
+               (lambda (entry)
+                 (format "- %s %S"
+                         (packlet--source-entry-kind entry)
+                         (packlet--source-entry-id entry)))
+               (cdr group)
+               "\n")))
+           groups)))
+    (concat
+     (format "Feature: %s\n" feature)
+     (format "Loaded: %s\n" (if (featurep feature) "yes" "no"))
+     (format "Sources: %d\n" (length groups))
+     (if sections
+         (concat "\n" (mapconcat #'identity sections "\n\n"))
+       "- none"))))
+
+;;;###autoload
+(defun packlet-describe-feature (feature)
+  "Describe the `packlet' registrations associated with FEATURE."
+  (interactive (list (packlet--read-feature-name)))
+  (unless (symbolp feature)
+    (error "packlet: FEATURE must be a symbol, got %S" feature))
+  (let ((description (packlet--describe-feature-string feature)))
+    (when (called-interactively-p 'interactive)
+      (with-help-window (help-buffer)
+        (princ description)))
     description))
 
 ;;;###autoload
@@ -752,7 +899,7 @@ restore the previous binding even when KEY no longer points at COMMAND."
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :config :commands :autoload :mode :hook
             :bind :bind-keymap :interpreter :magic :after :after-load :idle
-            :demand :functions :defines))
+            :magic-fallback :demand :functions :defines))
 
   (defvar packlet--user-keywords nil
     "Alist of (KEYWORD . PLIST) for user-defined keywords.
@@ -1319,6 +1466,10 @@ Example:
                   (packlet--section sections :magic)
                   :magic
                   #'packlet--magic-entry-p))
+         (magic-fallbacks (packlet--normalize-pairs
+                           (packlet--section sections :magic-fallback)
+                           :magic-fallback
+                           #'packlet--magic-entry-p))
          (hooks (packlet--normalize-hooks
                  (packlet--section sections :hook)))
          (bindings (packlet--normalize-bindings
@@ -1359,6 +1510,13 @@ Example:
           (lambda (function)
             `(declare-function ,function ,file))
           functions)
+       (packlet--register-source-entry
+        ',source-scope
+        ',(list :site-feature site feature)
+        (lambda ()
+          (puthash ',site ',feature packlet--site-features))
+        (lambda ()
+          (remhash ',site packlet--site-features)))
        ,@(packlet--expand-settings :setq feature site source-scope setq-forms)
        ,@(packlet--expand-settings :custom feature site source-scope custom-forms)
        ,@(mapcar
@@ -1420,6 +1578,21 @@ Example:
               (lambda ()
                 (setq magic-mode-alist
                       (delete ',magic magic-mode-alist))))))
+       ,@(cl-loop
+          for magic in magic-fallbacks
+          for index from 0
+          collect
+          `(progn
+             ,@(when (cdr magic)
+                 `((packlet--maybe-autoload ',(cdr magic) ,file t)))
+             (packlet--register-source-entry
+              ',source-scope
+              ',(list site :magic-fallback index)
+              (lambda ()
+                (add-to-list 'magic-fallback-mode-alist ',magic))
+              (lambda ()
+                (setq magic-fallback-mode-alist
+                      (delete ',magic magic-fallback-mode-alist))))))
        ,@(cl-loop
           for hook in hooks
           for index from 0

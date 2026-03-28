@@ -17,6 +17,7 @@
 (defvar packlet-test-helper-ran)
 (defvar packlet-test-interpreter-ran)
 (defvar packlet-test-magic-ran)
+(defvar packlet-test-magic-fallback-ran)
 (defvar packlet-test-prefix-command-ran)
 (defvar packlet-test-prefix-map-command-ran)
 (defvar packlet-test-parent-map)
@@ -385,6 +386,69 @@
             (eval-buffer))
           (should-not (assoc "PACKLET-REMOVE\\'" magic-mode-alist)))
       (packlet-test--cleanup-symbols '(packlet-test-magic-remove-mode))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-magic-fallback-autoload-and-registration ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (magic-fallback-mode-alist magic-fallback-mode-alist)
+         (feature 'packlet-test-magic-fallback-feature)
+         (symbols '(packlet-test-magic-fallback-mode
+                    packlet-test-magic-fallback-ran)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols symbols)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-magic-fallback-ran nil)\n\
+(defun packlet-test-magic-fallback-mode ()\n\
+  (interactive)\n\
+  (setq packlet-test-magic-fallback-ran t)\n\
+  (setq major-mode 'packlet-test-magic-fallback-mode))")
+          (packlet packlet-test-magic-fallback-feature
+            :magic-fallback ("PACKLET-FALLBACK\\'" . packlet-test-magic-fallback-mode))
+          (should (autoloadp (symbol-function 'packlet-test-magic-fallback-mode)))
+          (should (equal (assoc "PACKLET-FALLBACK\\'" magic-fallback-mode-alist)
+                         '("PACKLET-FALLBACK\\'" . packlet-test-magic-fallback-mode)))
+          (with-temp-buffer
+            (setq buffer-file-name (expand-file-name "fallback" directory))
+            (insert "PACKLET-FALLBACK")
+            (set-auto-mode)
+            (should (eq major-mode 'packlet-test-magic-fallback-mode))
+            (should (bound-and-true-p packlet-test-magic-fallback-ran))))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols symbols)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-magic-fallback-reeval-after-removal-clears-old-entry ()
+  (let ((source-file (make-temp-file "packlet-test-magic-fallback-remove-" nil ".el"))
+        (magic-fallback-mode-alist magic-fallback-mode-alist))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-symbols
+           '(packlet-test-magic-fallback-remove-mode))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-magic-fallback-remove-feature\n\
+  :magic-fallback (\"PACKLET-FALLBACK-REMOVE\\\\'\" . packlet-test-magic-fallback-remove-mode))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (should (equal (assoc "PACKLET-FALLBACK-REMOVE\\'"
+                                  magic-fallback-mode-alist)
+                           '("PACKLET-FALLBACK-REMOVE\\'"
+                             . packlet-test-magic-fallback-remove-mode)))
+            (erase-buffer)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should-not (assoc "PACKLET-FALLBACK-REMOVE\\'"
+                             magic-fallback-mode-alist)))
+      (packlet-test--cleanup-symbols
+       '(packlet-test-magic-fallback-remove-mode))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
@@ -785,6 +849,37 @@
           (goto-char (point-min))
           (eval-buffer)))
       (packlet-test--cleanup-symbols '(packlet-test-describe-hook))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-describe-feature-groups-source-entries ()
+  (let ((source-file (make-temp-file "packlet-test-describe-feature-" nil ".el")))
+    (defvar packlet-test-describe-feature-hook nil)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-describe-feature-target\n\
+  :setq (packlet-test-tracked-setq 7)\n\
+  :hook ((packlet-test-describe-feature-hook . ignore)))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (let ((description
+                 (packlet-describe-feature 'packlet-test-describe-feature-target)))
+            (should (string-match-p "Feature: packlet-test-describe-feature-target"
+                                    description))
+            (should (string-match-p (regexp-quote source-file) description))
+            (should (string-match-p ":setq" description))
+            (should (string-match-p ":hook" description))))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
+      (packlet-test--cleanup-symbols '(packlet-test-describe-feature-hook))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
