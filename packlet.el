@@ -341,8 +341,25 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
   (let ((description (packlet--describe-source-string source)))
     (when (called-interactively-p 'interactive)
       (with-help-window (help-buffer)
-        (princ description)))
+       (princ description)))
     description))
+
+;;;###autoload
+(defun packlet-cleanup-source (&optional source)
+  "Clean up the `packlet' registrations owned by SOURCE.
+SOURCE may be nil, a file name, a buffer, or a normalized source scope.
+Return entries whose cleanup failed."
+  (interactive)
+  (let* ((scope (packlet--resolve-source-scope source))
+         (failed (packlet--cleanup-source-scope scope t)))
+    (when (called-interactively-p 'interactive)
+      (message "packlet cleaned %s%s"
+               (packlet--source-scope-name scope)
+               (if failed
+                   (format " (%d cleanup failures preserved)"
+                           (length failed))
+                 "")))
+    failed))
 
 (defun packlet--form-contains-packlet-p (form &optional seen)
   "Return non-nil when FORM appears to contain a `packlet' call."
@@ -734,8 +751,8 @@ restore the previous binding even when KEY no longer points at COMMAND."
 (eval-and-compile
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :config :commands :autoload :mode :hook
-            :bind :bind-keymap :interpreter :after :after-load :idle :demand
-            :functions :defines))
+            :bind :bind-keymap :interpreter :magic :after :after-load :idle
+            :demand :functions :defines))
 
   (defvar packlet--user-keywords nil
     "Alist of (KEYWORD . PLIST) for user-defined keywords.
@@ -902,6 +919,16 @@ Each PLIST may contain:
     (and (consp value)
          (stringp (car value))
          (symbolp (cdr value))))
+
+  (defun packlet--magic-entry-p (value)
+    "Return non-nil when VALUE is a valid `:magic' entry."
+    (and (consp value)
+         (or (stringp (car value))
+             (symbolp (car value))
+             (and (consp (car value))
+                  (eq (caar value) 'lambda)))
+         (or (symbolp (cdr value))
+             (null (cdr value)))))
 
   (defun packlet--hook-entry-p (value)
     "Return non-nil when VALUE is a valid `:hook' entry."
@@ -1288,6 +1315,10 @@ Example:
                         (packlet--section sections :interpreter)
                         :interpreter
                         #'packlet--mode-entry-p))
+         (magics (packlet--normalize-pairs
+                  (packlet--section sections :magic)
+                  :magic
+                  #'packlet--magic-entry-p))
          (hooks (packlet--normalize-hooks
                  (packlet--section sections :hook)))
          (bindings (packlet--normalize-bindings
@@ -1374,6 +1405,21 @@ Example:
               (lambda ()
                 (setq interpreter-mode-alist
                       (delete ',interpreter interpreter-mode-alist))))))
+       ,@(cl-loop
+          for magic in magics
+          for index from 0
+          collect
+          `(progn
+             ,@(when (cdr magic)
+                 `((packlet--maybe-autoload ',(cdr magic) ,file t)))
+             (packlet--register-source-entry
+              ',source-scope
+              ',(list site :magic index)
+              (lambda ()
+                (add-to-list 'magic-mode-alist ',magic))
+              (lambda ()
+                (setq magic-mode-alist
+                      (delete ',magic magic-mode-alist))))))
        ,@(cl-loop
           for hook in hooks
           for index from 0

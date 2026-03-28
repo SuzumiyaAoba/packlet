@@ -16,6 +16,7 @@
 (defvar packlet-test-hook-ran)
 (defvar packlet-test-helper-ran)
 (defvar packlet-test-interpreter-ran)
+(defvar packlet-test-magic-ran)
 (defvar packlet-test-prefix-command-ran)
 (defvar packlet-test-prefix-map-command-ran)
 (defvar packlet-test-parent-map)
@@ -325,6 +326,65 @@
             (eval-buffer))
           (should-not (assoc "packlet-test-remove" interpreter-mode-alist)))
       (packlet-test--cleanup-symbols '(packlet-test-interpreter-remove-mode))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-magic-autoload-and-registration ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (magic-mode-alist magic-mode-alist)
+         (feature 'packlet-test-magic-feature)
+         (symbols '(packlet-test-magic-mode
+                    packlet-test-magic-ran)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols symbols)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-magic-ran nil)\n\
+(defun packlet-test-magic-mode ()\n\
+  (interactive)\n\
+  (setq packlet-test-magic-ran t)\n\
+  (setq major-mode 'packlet-test-magic-mode))")
+          (packlet packlet-test-magic-feature
+            :magic ("PACKLET-MAGIC\\'" . packlet-test-magic-mode))
+          (should (autoloadp (symbol-function 'packlet-test-magic-mode)))
+          (should (equal (assoc "PACKLET-MAGIC\\'" magic-mode-alist)
+                         '("PACKLET-MAGIC\\'" . packlet-test-magic-mode)))
+          (with-temp-buffer
+            (setq buffer-file-name (expand-file-name "magic" directory))
+            (insert "PACKLET-MAGIC")
+            (set-auto-mode)
+            (should (eq major-mode 'packlet-test-magic-mode))
+            (should (bound-and-true-p packlet-test-magic-ran))))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols symbols)
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-magic-reeval-after-removal-clears-old-entry ()
+  (let ((source-file (make-temp-file "packlet-test-magic-remove-" nil ".el"))
+        (magic-mode-alist magic-mode-alist))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-symbols '(packlet-test-magic-remove-mode))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-magic-remove-feature\n\
+  :magic (\"PACKLET-REMOVE\\\\'\" . packlet-test-magic-remove-mode))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (should (equal (assoc "PACKLET-REMOVE\\'" magic-mode-alist)
+                           '("PACKLET-REMOVE\\'"
+                             . packlet-test-magic-remove-mode)))
+            (erase-buffer)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should-not (assoc "PACKLET-REMOVE\\'" magic-mode-alist)))
+      (packlet-test--cleanup-symbols '(packlet-test-magic-remove-mode))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
@@ -725,6 +785,40 @@
           (goto-char (point-min))
           (eval-buffer)))
       (packlet-test--cleanup-symbols '(packlet-test-describe-hook))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-cleanup-source-file-scope ()
+  (let ((source-file (make-temp-file "packlet-test-cleanup-" nil ".el")))
+    (defvar packlet-test-cleanup-hook nil)
+    (unwind-protect
+        (progn
+          (setq packlet-test-tracked-setq 10
+                packlet-test-cleanup-hook nil
+                packlet-test-hook-count 0)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-cleanup-feature\n\
+  :setq (packlet-test-tracked-setq 7)\n\
+  :hook ((packlet-test-cleanup-hook . (lambda ()\n\
+                                        (setq packlet-test-hook-count\n\
+                                              (1+ packlet-test-hook-count))))))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (= packlet-test-tracked-setq 7))
+          (run-hooks 'packlet-test-cleanup-hook)
+          (should (= packlet-test-hook-count 1))
+          (should-not (packlet-cleanup-source source-file))
+          (should (= packlet-test-tracked-setq 10))
+          (setq packlet-test-hook-count 0)
+          (run-hooks 'packlet-test-cleanup-hook)
+          (should (= packlet-test-hook-count 0))
+          (should-not (packlet--source-entries
+                       (packlet--source-scope-file source-file))))
+      (setq packlet-test-hook-count nil)
+      (setq packlet-test-tracked-setq 0)
+      (packlet-test--cleanup-symbols '(packlet-test-cleanup-hook))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 

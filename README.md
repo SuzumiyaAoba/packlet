@@ -8,6 +8,7 @@ It focuses on the common parts of package configuration:
 - autoloading helper functions
 - registering `auto-mode-alist` entries
 - registering `interpreter-mode-alist` entries
+- registering `magic-mode-alist` entries
 - wiring hooks, global key bindings, and package keymaps
 - wiring lazy prefix-key keymaps
 - deferring configuration until a feature is actually loaded
@@ -68,8 +69,8 @@ Clone this repository and add it to `load-path`:
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
   `:setq`, `:custom`, `:config`, `:hook`, `:bind`, `:bind-keymap`, `:mode`,
-  `:interpreter`, `:after-load`, `:idle`, and `:demand` registrations from
-  that source instead of stacking duplicates.
+  `:interpreter`, `:magic`, `:after-load`, `:idle`, and `:demand`
+  registrations from that source instead of stacking duplicates.
 - File-backed reevaluation is transactional. If the new evaluation fails part
   way through, `packlet` restores the previously working registrations.
 - Direct `eval` is also tracked. In Lisp buffers, nested forms containing
@@ -78,6 +79,8 @@ Clone this repository and add it to `load-path`:
 - Non-file `eval` registrations are scoped to the current buffer and are
   cleaned up automatically when that buffer is killed.
 - `packlet-describe-source` shows the registrations currently owned by a file
+  or buffer scope.
+- `packlet-cleanup-source` removes the registrations currently owned by a file
   or buffer scope.
 
 ## Keywords
@@ -109,6 +112,9 @@ Clone this repository and add it to `load-path`:
   `("\\\\.ext\\\\'" . some-mode)` pairs added to `auto-mode-alist`.
 - `:interpreter`
   `("python3" . python-mode)` pairs added to `interpreter-mode-alist`.
+- `:magic`
+  `(regexp . mode)` or `(match-function . mode)` pairs added to
+  `magic-mode-alist`.
 - `:hook`
   `(some-hook . some-function)` pairs added with `add-hook`.
   You can also use `(some-hook some-function delay)` to run the function from
