@@ -27,6 +27,7 @@
 (defvar packlet-test-compile-function-ran)
 (defvar packlet-test-compile-config-ran)
 (defvar packlet-test-compile-second-config-ran)
+(defvar packlet-test-explain-config-ran)
 (defvar packlet-test-reeval-result)
 (defvar packlet-test-hook-count)
 (defvar packlet-test-tracked-setq 0)
@@ -110,6 +111,17 @@
     '((:init (setq a 1))
       (:commands command-a (command-b command-c))
       (:config (message "configured"))))))
+
+(ert-deftest packlet-test-normalize-hooks-with-options ()
+  (should
+   (equal
+    (packlet--normalize-hooks
+     '((packlet-test-hook-a . ignore)
+       (packlet-test-hook-b ignore :append t)
+       (packlet-test-hook-c ignore 0.5 :depth -10)))
+    '((:hook packlet-test-hook-a :function ignore :delay nil :depth 0)
+      (:hook packlet-test-hook-b :function ignore :delay nil :depth 90)
+      (:hook packlet-test-hook-c :function ignore :delay 0.5 :depth -10)))))
 
 (ert-deftest packlet-test-run-source-entry-cleanups-continues-after-error ()
   (let ((scope '(:buffer cleanup-buffer))
@@ -882,6 +894,70 @@
       (packlet-test--cleanup-symbols '(packlet-test-describe-feature-hook))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
+
+(ert-deftest packlet-test-explain-feature-shows-runtime-state ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (after-init-time nil)
+         (emacs-startup-hook nil)
+         (feature 'packlet-test-explain-feature)
+         (after-feature 'packlet-test-explain-after)
+         (source-file (expand-file-name "packlet-test-explain-config.el"
+                                        directory)))
+    (unwind-protect
+        (progn
+          (setq packlet-test-explain-config-ran nil)
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-feature after-feature)
+          (packlet-test--write-feature
+           directory
+           after-feature
+           "(defvar packlet-test-explain-after-loaded t)")
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-explain-feature-loaded t)")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-explain-feature\n\
+  :after packlet-test-explain-after\n\
+  :idle\n\
+  :demand t\n\
+  :config\n\
+  (setq packlet-test-explain-config-ran t))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (let ((before (packlet-explain-feature feature)))
+            (should (string-match-p "Loaded: no" before))
+            (should (string-match-p "Afters: packlet-test-explain-after" before))
+            (should (string-match-p "Missing afters: packlet-test-explain-after"
+                                    before))
+            (should (string-match-p "Config: waiting for feature" before))
+            (should (string-match-p "Demand: waiting for afters" before))
+            (should (string-match-p "Idle: waiting for afters" before)))
+          (require after-feature)
+          (let ((after (packlet-explain-feature feature)))
+            (should (featurep feature))
+            (should (bound-and-true-p packlet-test-explain-config-ran))
+            (should (string-match-p "Loaded: yes" after))
+            (should (string-match-p "Missing afters: none" after))
+            (should (string-match-p "Config: done" after))
+            (should (string-match-p "Demand: loaded" after))
+            (should (string-match-p "Idle: loaded" after))))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
+      (setq packlet-test-explain-config-ran nil)
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-feature after-feature)
+      (when (file-exists-p source-file)
+        (delete-file source-file))
+      (delete-directory directory t))))
 
 (ert-deftest packlet-test-cleanup-source-file-scope ()
   (let ((source-file (make-temp-file "packlet-test-cleanup-" nil ".el")))
@@ -1855,6 +1931,28 @@
           (should (= (length cancelled) 1))
           (should (= (length scheduled) 2)))
       (packlet-test--cleanup-symbols '(packlet-test-debounce-hook)))))
+
+(ert-deftest packlet-test-hook-options-control-order ()
+  (defvar packlet-test-order-hook nil)
+  (let ((packlet-test-order-hook nil)
+        (result nil))
+    (unwind-protect
+        (progn
+          (add-hook 'packlet-test-order-hook
+                    (lambda ()
+                      (setq result (append result '(middle)))))
+          (packlet packlet-test-hook-order-feature
+            :hook ((packlet-test-order-hook
+                    (lambda ()
+                      (setq result (append result '(first))))
+                    :depth -10)
+                   (packlet-test-order-hook
+                    (lambda ()
+                      (setq result (append result '(last))))
+                    :append t)))
+          (run-hooks 'packlet-test-order-hook)
+          (should (equal result '(first middle last))))
+      (setq packlet-test-order-hook nil))))
 
 (ert-deftest packlet-test-hook-reeval-does-not-duplicate ()
   (defvar packlet-test-reeval-hook nil)

@@ -355,13 +355,18 @@ Return entries whose cleanup failed."
 
 (defun packlet--site-feature (site)
   "Return the feature associated with expansion SITE."
-  (pcase site
-    (`(eval ,_ ,feature ,_)
-     feature)
-    (`(load ,_ ,_)
-     (gethash site packlet--site-features))
-    (_
-     nil)))
+  (or (plist-get (gethash site packlet--site-features) :feature)
+      (pcase site
+        (`(eval ,_ ,feature ,_)
+         feature)
+        (_
+         nil))))
+
+(defun packlet--site-metadata-put (site property value)
+  "Set PROPERTY to VALUE for expansion SITE metadata."
+  (when-let ((metadata (copy-sequence (gethash site packlet--site-features))))
+    (puthash site (plist-put metadata property value)
+             packlet--site-features)))
 
 (defun packlet--source-entry-feature (entry)
   "Return the configured feature associated with source ENTRY."
@@ -435,8 +440,9 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
            (append
             (let (result)
               (maphash
-               (lambda (_site feature)
-                 (push (symbol-name feature) result))
+               (lambda (_site metadata)
+                 (when-let ((feature (plist-get metadata :feature)))
+                   (push (symbol-name feature) result)))
                packlet--site-features)
               result)
             (mapcar #'symbol-name features))))
@@ -479,6 +485,147 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
          (concat "\n" (mapconcat #'identity sections "\n\n"))
        "- none"))))
 
+(defun packlet--site-entries (site entries)
+  "Return ENTRIES associated with expansion SITE."
+  (cl-remove-if-not
+   (lambda (entry)
+     (equal (packlet--find-entry-site (packlet--source-entry-id entry))
+            site))
+   entries))
+
+(defun packlet--site-has-entry-p (site kind entries)
+  "Return non-nil when SITE has a KIND entry inside ENTRIES."
+  (cl-some
+   (lambda (entry)
+     (let ((id (packlet--source-entry-id entry)))
+       (and (consp id)
+            (equal (car id) site)
+            (eq (cadr id) kind))))
+   entries))
+
+(defun packlet--site-missing-afters (metadata)
+  "Return unmet `:after' dependencies from METADATA."
+  (cl-remove-if #'featurep (copy-sequence (plist-get metadata :afters))))
+
+(defun packlet--idle-status (feature site metadata _entries)
+  "Return the idle-load status for FEATURE at SITE from METADATA."
+  (let ((state (gethash (list site :idle) packlet--idle-load-states)))
+    (cond
+     ((not (plist-get metadata :has-idle))
+      "none")
+     ((featurep feature)
+      "loaded")
+     ((not state)
+      "disabled")
+     ((not (packlet--all-features-loaded-p (plist-get metadata :afters)))
+      "waiting for afters")
+     ((not (packlet--idle-state-startup-complete state))
+      "waiting for startup")
+     ((timerp (packlet--idle-state-timer state))
+      "scheduled")
+     (t
+      "ready"))))
+
+(defun packlet--demand-status (feature _site metadata _entries)
+  "Return the demand-load status for FEATURE from METADATA."
+  (cond
+   ((not (plist-get metadata :has-demand))
+    "none")
+   ((featurep feature)
+    "loaded")
+   ((not (plist-get metadata :demand-enabled))
+    "disabled")
+   ((packlet--all-features-loaded-p (plist-get metadata :afters))
+    "ready")
+   (t
+    "waiting for afters")))
+
+(defun packlet--config-status (feature metadata)
+  "Return the config status for FEATURE from METADATA."
+  (let ((configured-var (plist-get metadata :configured-var)))
+    (cond
+     ((not (plist-get metadata :has-config))
+      "none")
+     ((and configured-var
+           (boundp configured-var)
+           (symbol-value configured-var))
+      "done")
+     ((not (featurep feature))
+      "waiting for feature")
+     ((packlet--site-missing-afters metadata)
+      "waiting for afters")
+     (t
+      "ready"))))
+
+(defun packlet--feature-explanations (feature)
+  "Return explanation groups for FEATURE."
+  (let (groups)
+    (dolist (group (packlet--all-source-groups))
+      (let ((scope (car group))
+            (entries (cdr group))
+            sites)
+        (dolist (entry entries)
+          (when (eq (packlet--source-entry-feature entry) feature)
+            (when-let ((site (packlet--find-entry-site
+                              (packlet--source-entry-id entry))))
+              (cl-pushnew site sites :test #'equal))))
+        (dolist (site (nreverse sites))
+          (when-let ((metadata (gethash site packlet--site-features)))
+            (push (list :scope scope
+                        :site site
+                        :entries (packlet--site-entries site entries)
+                        :metadata metadata)
+                  groups)))))
+    (nreverse groups)))
+
+(defun packlet--explain-feature-string (feature)
+  "Return an explanation of `packlet' FEATURE state."
+  (let* ((groups (packlet--feature-explanations feature))
+         (sections
+          (mapcar
+           (lambda (group)
+             (let* ((scope (plist-get group :scope))
+                    (entries (packlet--display-source-entries
+                              (plist-get group :entries)))
+                    (metadata (plist-get group :metadata))
+                    (missing-afters (packlet--site-missing-afters metadata)))
+               (mapconcat
+                #'identity
+                (delq
+                 nil
+                 (list
+                  (packlet--source-scope-name scope)
+                  (format "Entries: %d" (length entries))
+                  (format "Afters: %s"
+                          (if-let ((afters (plist-get metadata :afters)))
+                              (mapconcat #'symbol-name afters ", ")
+                            "none"))
+                  (format "Missing afters: %s"
+                          (if missing-afters
+                              (mapconcat #'symbol-name missing-afters ", ")
+                            "none"))
+                  (format "Config: %s"
+                          (packlet--config-status feature metadata))
+                  (format "Demand: %s"
+                          (packlet--demand-status feature
+                                                  (plist-get group :site)
+                                                  metadata
+                                                  (plist-get group :entries)))
+                  (format "Idle: %s"
+                          (packlet--idle-status feature
+                                                (plist-get group :site)
+                                                metadata
+                                                (plist-get group :entries)))))
+                "\n")))
+           groups)))
+    (concat
+     (format "Feature: %s\n" feature)
+     (format "Loaded: %s\n" (if (featurep feature) "yes" "no"))
+     (format "Sources: %d\n" (length groups))
+     (if sections
+         (concat "\n" (mapconcat #'identity sections "\n\n"))
+       "- none"))))
+
 ;;;###autoload
 (defun packlet-describe-feature (feature)
   "Describe the `packlet' registrations associated with FEATURE."
@@ -486,6 +633,18 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
   (unless (symbolp feature)
     (error "packlet: FEATURE must be a symbol, got %S" feature))
   (let ((description (packlet--describe-feature-string feature)))
+    (when (called-interactively-p 'interactive)
+      (with-help-window (help-buffer)
+        (princ description)))
+    description))
+
+;;;###autoload
+(defun packlet-explain-feature (feature)
+  "Explain the current `packlet' runtime state for FEATURE."
+  (interactive (list (packlet--read-feature-name)))
+  (unless (symbolp feature)
+    (error "packlet: FEATURE must be a symbol, got %S" feature))
+  (let ((description (packlet--explain-feature-string feature)))
     (when (called-interactively-p 'interactive)
       (with-help-window (help-buffer)
         (princ description)))
@@ -1086,6 +1245,70 @@ Each PLIST may contain:
                (and (consp function)
                     (eq (car function) 'lambda))))))
 
+  (defun packlet--hook-function-p (value)
+    "Return non-nil when VALUE is a supported hook function form."
+    (or (symbolp value)
+        (and (consp value)
+             (eq (car value) 'lambda))))
+
+  (defun packlet--normalize-hook-options (options)
+    "Normalize `:hook' OPTIONS into a plist."
+    (let (append depth)
+      (while options
+        (let ((key (pop options)))
+          (unless (keywordp key)
+            (error "packlet: invalid hook option %S" key))
+          (unless options
+            (error "packlet: missing value for hook option %S" key))
+          (let ((value (pop options)))
+            (pcase key
+              (:append
+               (unless (memq value '(nil t))
+                 (error "packlet: :append for :hook must be nil or t, got %S"
+                        value))
+               (setq append value))
+              (:depth
+               (unless (numberp value)
+                 (error "packlet: :depth for :hook must be a number, got %S"
+                        value))
+               (setq depth value))
+              (_
+               (error "packlet: unsupported hook option %S" key))))))
+      (list :depth (or depth
+                       (if append 90 0)))))
+
+  (defun packlet--normalize-hook-entry (value)
+    "Normalize a single `:hook' VALUE into a plist."
+    (cond
+     ((packlet--hook-entry-p value)
+      (list :hook (car value)
+            :function (cdr value)
+            :delay nil
+            :depth 0))
+     ((packlet--proper-list-p value)
+      (let ((hook (car value))
+            (rest (cdr value))
+            delay)
+        (unless (symbolp hook)
+          (error "packlet: invalid entry %S for :hook" value))
+        (unless rest
+          (error "packlet: invalid entry %S for :hook" value))
+        (unless (packlet--hook-function-p (car rest))
+          (error "packlet: invalid hook function %S" (car rest)))
+        (let ((function (car rest))
+              (options (cdr rest)))
+          (when (and options (numberp (car options)))
+            (setq delay (pop options))
+            (when (< delay 0)
+              (error "packlet: invalid entry %S for :hook" value)))
+          (append
+           (list :hook hook
+                 :function function
+                 :delay delay)
+           (packlet--normalize-hook-options options)))))
+     (t
+      (error "packlet: invalid entry %S for :hook" value))))
+
   (defun packlet--delayed-hook-entry-p (value)
     "Return non-nil when VALUE is a delayed `:hook' entry (HOOK FUNCTION DELAY).
 DELAY must be a non-negative number."
@@ -1140,23 +1363,17 @@ DELAY must be a non-negative number."
 
   (defun packlet--normalize-hooks (forms)
     "Normalize FORMS under `:hook' into a flat list of hook entries.
-Each entry is either (HOOK . FUNCTION) or (HOOK FUNCTION DELAY)."
+Each entry becomes a plist with :hook, :function, :delay, and :depth."
     (let (result)
       (dolist (form forms)
         (cond
-         ((packlet--hook-entry-p form)
-          (push form result))
-         ((packlet--delayed-hook-entry-p form)
-          (push form result))
+         ((or (packlet--hook-entry-p form)
+              (and (packlet--proper-list-p form)
+                   (symbolp (car-safe form))))
+          (push (packlet--normalize-hook-entry form) result))
          ((packlet--proper-list-p form)
           (dolist (entry form)
-            (cond
-             ((packlet--hook-entry-p entry)
-              (push entry result))
-             ((packlet--delayed-hook-entry-p entry)
-              (push entry result))
-             (t
-              (error "packlet: invalid entry %S for :hook" entry)))))
+            (push (packlet--normalize-hook-entry entry) result)))
          (t
           (error "packlet: invalid value %S for :hook" form))))
       (nreverse result)))
@@ -1514,7 +1731,16 @@ Example:
         ',source-scope
         ',(list :site-feature site feature)
         (lambda ()
-          (puthash ',site ',feature packlet--site-features))
+          (puthash ',site
+                   (list :feature ',feature
+                         :file ,file
+                         :afters ',afters
+                         :has-config ,(and config-forms t)
+                         :configured-var ',(and config-forms configured-var)
+                         :has-demand ,(and (packlet--has-section-p sections :demand) t)
+                         :demand-enabled nil
+                         :has-idle ,(and (packlet--has-section-p sections :idle) t))
+                   packlet--site-features))
         (lambda ()
           (remhash ',site packlet--site-features)))
        ,@(packlet--expand-settings :setq feature site source-scope setq-forms)
@@ -1597,19 +1823,18 @@ Example:
           for hook in hooks
           for index from 0
           append
-          (let* ((hook-var (car hook))
-                 (function (if (packlet--delayed-hook-entry-p hook)
-                               (cadr hook)
-                             (cdr hook)))
+          (let* ((hook-var (plist-get hook :hook))
+                 (function (plist-get hook :function))
+                 (delay (plist-get hook :delay))
+                 (depth (plist-get hook :depth))
                  (hook-function
                   (packlet--generated-symbol
                    "packlet--hook"
                    feature
                    site
                    (format "hook-%d" index))))
-            (if (packlet--delayed-hook-entry-p hook)
-                (let ((delay (caddr hook))
-                      (timer-var
+            (if delay
+                (let ((timer-var
                        (packlet--generated-symbol
                         "packlet--delayed-hook-timer"
                         feature
@@ -1631,11 +1856,11 @@ Example:
                              (cancel-timer ,timer-var))
                            (setq ,timer-var
                                  (run-with-idle-timer
-                                  ,delay nil
+                                 ,delay nil
                                   (lambda ()
                                     (setq ,timer-var nil)
                                     (funcall ,(packlet--hook-function-form function)))))))
-                       (add-hook ',hook-var ',hook-function))
+                       (add-hook ',hook-var ',hook-function ,depth))
                      (lambda ()
                        (remove-hook ',hook-var ',hook-function)
                        (when (boundp ',timer-var)
@@ -1654,7 +1879,7 @@ Example:
                      (defalias ',hook-function
                        (lambda ()
                          (funcall ,(packlet--hook-function-form function))))
-                     (add-hook ',hook-var ',hook-function))
+                     (add-hook ',hook-var ',hook-function ,depth))
                    (lambda ()
                      (remove-hook ',hook-var ',hook-function)
                      (when (fboundp ',hook-function)
@@ -1855,6 +2080,7 @@ Example:
               ,source-file)))
        ,@(when (packlet--has-section-p sections :demand)
            `((when ,demand-form
+               (packlet--site-metadata-put ',site :demand-enabled t)
                (packlet--register-demand-load
                 ',(list site :demand)
                 ',feature
