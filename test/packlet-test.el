@@ -30,6 +30,8 @@
 (defvar packlet-test-explain-config-ran)
 (defvar packlet-test-reeval-result)
 (defvar packlet-test-hook-count)
+(defvar packlet-test-hook-setq-value nil)
+(defvar packlet-test-hook-setq-other nil)
 (defvar packlet-test-list-a nil)
 (defvar packlet-test-list-b nil)
 (defvar packlet-test-compare-list nil)
@@ -142,6 +144,24 @@
     '((:hook packlet-test-hook-a :function ignore :delay nil :depth 0 :local nil)
       (:hook packlet-test-hook-b :function ignore :delay nil :depth 90 :local nil)
       (:hook packlet-test-hook-c :function ignore :delay 0.5 :depth -10 :local t)))))
+
+(ert-deftest packlet-test-normalize-hook-setqs ()
+  (should
+   (equal
+    (packlet--normalize-hook-setqs
+     '((packlet-test-hook-a
+        (packlet-test-hook-setq-value 42)
+        (packlet-test-hook-setq-other "ok"))))
+    '((:kind :hook-setq
+       :hook packlet-test-hook-a
+       :function
+       (lambda ()
+         (setq-local packlet-test-hook-setq-value 42)
+         (setq-local packlet-test-hook-setq-other "ok")
+         nil)
+       :delay nil
+       :depth 0
+       :local nil)))))
 
 (ert-deftest packlet-test-run-source-entry-cleanups-continues-after-error ()
   (let ((scope '(:buffer cleanup-buffer))
@@ -881,6 +901,33 @@
           (goto-char (point-min))
           (eval-buffer)))
       (packlet-test--cleanup-symbols '(packlet-test-describe-hook))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-describe-source-shows-hook-setq ()
+  (let ((source-file (make-temp-file "packlet-test-describe-hook-setq-" nil ".el")))
+    (defvar packlet-test-describe-hook-setq nil)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-describe-hook-setq-feature\n\
+  :hook-setq ((packlet-test-describe-hook-setq\n\
+               (packlet-test-hook-setq-value 42))))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (let ((description (packlet-describe-source source-file)))
+            (should (string-match-p (regexp-quote source-file) description))
+            (should (string-match-p ":hook-setq" description))))
+      (ignore-errors
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (setq buffer-file-name source-file)
+          (insert ";; removed\n")
+          (goto-char (point-min))
+          (eval-buffer)))
+      (packlet-test--cleanup-symbols '(packlet-test-describe-hook-setq))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
@@ -2447,6 +2494,52 @@
        '(packlet-test-reeval-hook-a packlet-test-reeval-hook-b))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
+
+(ert-deftest packlet-test-hook-setq-applies-buffer-local-settings ()
+  (defvar packlet-test-hook-setq-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-setq-hook nil
+              packlet-test-hook-setq-value nil
+              packlet-test-hook-setq-other nil)
+        (eval
+         '(packlet packlet-test-hook-setq-feature
+            :hook-setq ((packlet-test-hook-setq-hook
+                         (packlet-test-hook-setq-value 42)
+                         (packlet-test-hook-setq-other "ok")))))
+        (with-temp-buffer
+          (run-hooks 'packlet-test-hook-setq-hook)
+          (should (local-variable-p 'packlet-test-hook-setq-value (current-buffer)))
+          (should (local-variable-p 'packlet-test-hook-setq-other (current-buffer)))
+          (should (equal packlet-test-hook-setq-value 42))
+          (should (equal packlet-test-hook-setq-other "ok")))
+        (should (null packlet-test-hook-setq-value))
+        (should (null packlet-test-hook-setq-other)))
+    (setq packlet-test-hook-setq-value nil
+          packlet-test-hook-setq-other nil)
+    (packlet-test--cleanup-symbols '(packlet-test-hook-setq-hook))))
+
+(ert-deftest packlet-test-hook-setq-reeval-does-not-duplicate ()
+  (defvar packlet-test-hook-setq-reeval-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-setq-reeval-hook nil
+              packlet-test-hook-count 0)
+        (eval
+         '(packlet packlet-test-hook-setq-reeval-feature
+            :hook-setq ((packlet-test-hook-setq-reeval-hook
+                         (packlet-test-hook-count
+                          (1+ packlet-test-hook-count))))))
+        (eval
+         '(packlet packlet-test-hook-setq-reeval-feature
+            :hook-setq ((packlet-test-hook-setq-reeval-hook
+                         (packlet-test-hook-count
+                          (1+ packlet-test-hook-count))))))
+        (with-temp-buffer
+          (run-hooks 'packlet-test-hook-setq-reeval-hook)
+          (should (= packlet-test-hook-count 1))))
+    (setq packlet-test-hook-count nil)
+    (packlet-test--cleanup-symbols '(packlet-test-hook-setq-reeval-hook))))
 
 (ert-deftest packlet-test-bind-reeval-after-removal-preserves-later-global-binding ()
   (let* ((source-file (make-temp-file "packlet-test-bind-remove-" nil ".el"))

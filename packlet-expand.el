@@ -123,8 +123,11 @@
                            (packlet--section sections :magic-fallback)
                            :magic-fallback
                            #'packlet--magic-entry-p))
-         (hooks (packlet--normalize-hooks
-                 (packlet--section sections :hook)))
+         (hooks (append
+                 (packlet--normalize-hooks
+                  (packlet--section sections :hook))
+                 (packlet--normalize-hook-setqs
+                  (packlet--section sections :hook-setq))))
          (bindings (packlet--normalize-bindings
                     (packlet--section sections :bind)))
          (keymap-bindings (packlet--normalize-bindings
@@ -647,13 +650,14 @@
           for index from 0
           append
           (let* ((hook-var (plist-get hook :hook))
+                 (kind (or (plist-get hook :kind) :hook))
                  (function (plist-get hook :function))
                  (delay (plist-get hook :delay))
                  (depth (plist-get hook :depth))
                  (local (plist-get hook :local))
                  (hook-function
                   (packlet--generated-symbol
-                   "packlet--hook"
+                   (format "packlet--%s" (substring (symbol-name kind) 1))
                    feature
                    site
                    (format "hook-%d" index)))
@@ -678,7 +682,7 @@
                         `((packlet--maybe-autoload ',function ,file nil)))
                     (packlet--register-source-entry
                      ',source-scope
-                     ',(list site :hook index)
+                     ',(list site kind index)
                      (lambda ()
                        ,@(when local
                            `((setq ,hook-buffer-var (current-buffer))))
@@ -720,7 +724,7 @@
                       `((packlet--maybe-autoload ',function ,file nil)))
                   (packlet--register-source-entry
                    ',source-scope
-                   ',(list site :hook index)
+                   ',(list site kind index)
                    (lambda ()
                      ,@(when local
                          `((setq ,hook-buffer-var (current-buffer))))

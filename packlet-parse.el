@@ -16,7 +16,7 @@
 
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :add-to-list :list :alist :config
-            :commands :autoload :mode :remap :derived-mode :hook :bind
+            :commands :autoload :mode :remap :derived-mode :hook :hook-setq :bind
             :bind-keymap :prefix-map :enable :faces :advice :interpreter
             :magic :after :after-load :idle :magic-fallback :demand
             :functions :defines))
@@ -231,6 +231,19 @@ Each PLIST may contain:
         (and (consp value)
              (eq (car value) 'lambda))))
 
+  (defun packlet--hook-setq-setting-p (value)
+    "Return non-nil when VALUE is a valid `:hook-setq' setting."
+    (and (packlet--proper-list-p value)
+         (= (length value) 2)
+         (symbolp (car value))))
+
+  (defun packlet--hook-setq-entry-p (value)
+    "Return non-nil when VALUE is a valid `:hook-setq' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (cdr value)
+         (cl-every #'packlet--hook-setq-setting-p (cdr value))))
+
   (defun packlet--parse-keyword-options (options spec context)
     "Parse keyword OPTIONS according to SPEC, reporting errors for CONTEXT.
 SPEC is an alist of (KEYWORD . VALIDATOR) where VALIDATOR is nil (accept any
@@ -388,6 +401,29 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
                      (and (packlet--proper-list-p f)
                           (symbolp (car-safe f)))))
      #'packlet--normalize-hook-entry))
+
+  (defun packlet--normalize-hook-setq-entry (value)
+    "Normalize a single `:hook-setq' VALUE into a hook entry."
+    (unless (packlet--hook-setq-entry-p value)
+      (error "packlet: invalid entry %S for :hook-setq" value))
+    (list :kind :hook-setq
+          :hook (car value)
+          :function `(lambda ()
+                       ,@(mapcar
+                          (lambda (setting)
+                            `(setq-local ,(car setting) ,(cadr setting)))
+                          (cdr value))
+                       nil)
+          :delay nil
+          :depth 0
+          :local nil))
+
+  (defun packlet--normalize-hook-setqs (forms)
+    "Normalize FORMS under `:hook-setq' into a flat list of hook entries."
+    (packlet--normalize-entries
+     forms :hook-setq
+     #'packlet--hook-setq-entry-p
+     #'packlet--normalize-hook-setq-entry))
 
   (defun packlet--autoload-entry-p (value)
     "Return non-nil when VALUE is a valid `:autoload' tuple entry.
