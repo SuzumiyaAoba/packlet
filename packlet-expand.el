@@ -83,7 +83,7 @@
                             (list :file source-file)))
          (has-guard (or (packlet--has-section-p sections :when)
                         (packlet--has-section-p sections :unless)))
-         (guard-form (packlet--guard-form sections))
+         (guard-form (and has-guard (packlet--guard-form sections)))
          (init-forms (packlet--section sections :init))
          (setq-forms (packlet--normalize-customs
                       (packlet--section sections :setq)))

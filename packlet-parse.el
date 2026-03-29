@@ -270,6 +270,10 @@ Each PLIST may contain:
         (and (packlet--proper-list-p value)
              (symbolp (car-safe value)))))
 
+  (defun packlet--bool-option-p (v)
+    "Return non-nil when V is nil or t."
+    (memq v '(nil t)))
+
   (defun packlet--parse-keyword-options (options spec context)
     "Parse keyword OPTIONS according to SPEC, reporting errors for CONTEXT.
 SPEC is an alist of (KEYWORD . VALIDATOR) where VALIDATOR is nil (accept any
@@ -314,29 +318,29 @@ a cons cell of (POSITIONALS . OPTION-FORMS)."
 
   (defun packlet--normalize-hook-options (options)
     "Normalize `:hook' OPTIONS into a plist."
-    (let* ((bool-p (lambda (v) (memq v '(nil t))))
-           (parsed (packlet--parse-keyword-options
+    (let* ((parsed (packlet--parse-keyword-options
                     options
-                    `((:append . ,bool-p)
+                    '((:append . packlet--bool-option-p)
                       (:depth  . numberp)
-                      (:local  . ,bool-p))
+                      (:local  . packlet--bool-option-p))
                     "hook"))
            (append (alist-get :append parsed))
            (depth  (alist-get :depth parsed)))
       (list :depth (or depth (if append 90 0))
             :local (alist-get :local parsed))))
 
+  (defun packlet--non-negative-number-p (v)
+    "Return non-nil when V is a non-negative number."
+    (and (numberp v) (>= v 0)))
+
   (defun packlet--normalize-hook-like-options (options context)
     "Normalize hook-like OPTIONS into a plist for CONTEXT."
-    (let* ((bool-p (lambda (v) (memq v '(nil t))))
-           (non-negative-number-p
-            (lambda (v) (and (numberp v) (>= v 0))))
-           (parsed (packlet--parse-keyword-options
+    (let* ((parsed (packlet--parse-keyword-options
                     options
-                    `((:append . ,bool-p)
+                    '((:append . packlet--bool-option-p)
                       (:depth  . numberp)
-                      (:local  . ,bool-p)
-                      (:delay  . ,non-negative-number-p))
+                      (:local  . packlet--bool-option-p)
+                      (:delay  . packlet--non-negative-number-p))
                     context))
            (append (alist-get :append parsed))
            (depth (alist-get :depth parsed)))
@@ -346,11 +350,10 @@ a cons cell of (POSITIONALS . OPTION-FORMS)."
 
   (defun packlet--normalize-hook-add-options (options)
     "Normalize `:hook-add' OPTIONS into a plist."
-    (let* ((bool-p (lambda (v) (memq v '(nil t))))
-           (parsed (packlet--parse-keyword-options
+    (let* ((parsed (packlet--parse-keyword-options
                     options
-                    `((:append . ,bool-p)
-                      (:local  . ,bool-p))
+                    '((:append . packlet--bool-option-p)
+                      (:local  . packlet--bool-option-p))
                     "hook-add")))
       (list :append (alist-get :append parsed)
             :local (alist-get :local parsed))))
@@ -763,15 +766,15 @@ an explicit `:compare' option."
          ((and (packlet--proper-list-p form)
                (symbolp (car-safe form)))
           (setq result
-                (append result
-                        (packlet--normalize-list-entry
-                         form keyword default-compare))))
+                (nconc result
+                       (packlet--normalize-list-entry
+                        form keyword default-compare))))
          ((packlet--proper-list-p form)
           (dolist (entry form)
             (setq result
-                  (append result
-                          (packlet--normalize-list-entry
-                           entry keyword default-compare)))))
+                  (nconc result
+                         (packlet--normalize-list-entry
+                          entry keyword default-compare)))))
          (t
           (error "packlet: invalid value %S for %S" form keyword))))
       result))
