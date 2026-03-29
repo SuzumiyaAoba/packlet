@@ -13,7 +13,7 @@ It focuses on the common parts of package configuration:
 - registering `magic-mode-alist` entries
 - registering `magic-fallback-mode-alist` entries
 - defining derived major modes
-- wiring hooks, hook-local variable settings, global key bindings, and package keymaps
+- wiring hooks, common hook-driven setup, global key bindings, and package keymaps
 - defining prefix keymaps for package-local bindings
 - wiring lazy prefix-key keymaps
 - enabling mode-like functions after their feature loads
@@ -77,8 +77,9 @@ Clone this repository and add it to `load-path`:
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
   `:setq`, `:custom`, `:add-to-list`, `:list`, `:alist`, `:config`,
-  `:hook`, `:hook-setq`, `:bind`, `:bind-keymap`, `:prefix-map`, `:enable`,
-  `:faces`, `:advice`, `:mode`, `:remap`, `:derived-mode`, `:interpreter`, `:magic`,
+  `:hook`, `:hook-setq`, `:hook-add`, `:hook-enable`, `:bind`,
+  `:bind-keymap`, `:prefix-map`, `:enable`, `:faces`, `:advice`,
+  `:mode`, `:remap`, `:derived-mode`, `:interpreter`, `:magic`,
   `:magic-fallback`, `:after-load`, `:idle`, and `:demand` registrations
   from that source instead of stacking duplicates.
 - File-backed reevaluation is transactional. If the new evaluation fails part
@@ -160,6 +161,15 @@ Clone this repository and add it to `load-path`:
   `(some-hook (variable value) ...)` entries that add a hook function calling
   `setq-local` for each variable. This is useful for mode hooks such as
   `(python-mode-hook (python-indent-offset 4) (fill-column 88))`.
+- `:hook-add`
+  `(some-hook target-hook function)` entries that add `function` to
+  `target-hook` when `some-hook` runs. `function` must be a symbol.
+  List-style entries additionally accept `:append t` and `:local t`, for
+  example `(go-mode-hook before-save-hook gofmt :local t)`.
+- `:hook-enable`
+  `(some-hook function)` or `(some-hook function arg)` entries that call a
+  mode-like function from a hook. This is useful for patterns such as
+  `(prog-mode-hook display-line-numbers-mode)`.
 - `:bind`
   Global key bindings such as `("C-c p" . some-command)` or keymap groups such
   as `(:map some-mode-map ("C-c p" . some-command))`.

@@ -16,9 +16,10 @@
 
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :add-to-list :list :alist :config
-            :commands :autoload :mode :remap :derived-mode :hook :hook-setq :bind
-            :bind-keymap :prefix-map :enable :faces :advice :interpreter
-            :magic :after :after-load :idle :magic-fallback :demand
+            :commands :autoload :mode :remap :derived-mode
+            :hook :hook-setq :hook-add :hook-enable
+            :bind :bind-keymap :prefix-map :enable :faces :advice
+            :interpreter :magic :after :after-load :idle :magic-fallback :demand
             :functions :defines))
 
   (defvar packlet--user-keywords nil
@@ -244,6 +245,20 @@ Each PLIST may contain:
          (cdr value)
          (cl-every #'packlet--hook-setq-setting-p (cdr value))))
 
+  (defun packlet--hook-add-entry-p (value)
+    "Return non-nil when VALUE looks like a valid `:hook-add' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (symbolp (cadr value))
+         (symbolp (caddr value))))
+
+  (defun packlet--hook-enable-entry-p (value)
+    "Return non-nil when VALUE looks like a valid `:hook-enable' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (symbolp (cadr value))
+         (null (cdddr value))))
+
   (defun packlet--parse-keyword-options (options spec context)
     "Parse keyword OPTIONS according to SPEC, reporting errors for CONTEXT.
 SPEC is an alist of (KEYWORD . VALIDATOR) where VALIDATOR is nil (accept any
@@ -281,6 +296,17 @@ Returns an alist of (KEYWORD . VALUE) for recognized keywords."
            (append (alist-get :append parsed))
            (depth  (alist-get :depth parsed)))
       (list :depth (or depth (if append 90 0))
+            :local (alist-get :local parsed))))
+
+  (defun packlet--normalize-hook-add-options (options)
+    "Normalize `:hook-add' OPTIONS into a plist."
+    (let* ((bool-p (lambda (v) (memq v '(nil t))))
+           (parsed (packlet--parse-keyword-options
+                    options
+                    `((:append . ,bool-p)
+                      (:local  . ,bool-p))
+                    "hook-add")))
+      (list :append (alist-get :append parsed)
             :local (alist-get :local parsed))))
 
   (defun packlet--normalize-hook-entry (value)
@@ -424,6 +450,56 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
      forms :hook-setq
      #'packlet--hook-setq-entry-p
      #'packlet--normalize-hook-setq-entry))
+
+  (defun packlet--normalize-hook-add-entry (value)
+    "Normalize a single `:hook-add' VALUE into a hook entry."
+    (unless (packlet--hook-add-entry-p value)
+      (error "packlet: invalid entry %S for :hook-add" value))
+    (let* ((hook (nth 0 value))
+           (target-hook (nth 1 value))
+           (function (nth 2 value))
+           (options (packlet--normalize-hook-add-options (nthcdr 3 value))))
+      (list :kind :hook-add
+            :hook hook
+            :function `(lambda ()
+                         (add-hook ',target-hook
+                                   ',function
+                                   ,(plist-get options :append)
+                                   ,(plist-get options :local)))
+            :delay nil
+            :depth 0
+            :local nil)))
+
+  (defun packlet--normalize-hook-adds (forms)
+    "Normalize FORMS under `:hook-add' into a flat list of hook entries."
+    (packlet--normalize-entries
+     forms :hook-add
+     #'packlet--hook-add-entry-p
+     #'packlet--normalize-hook-add-entry))
+
+  (defun packlet--normalize-hook-enable-entry (value)
+    "Normalize a single `:hook-enable' VALUE into a hook entry."
+    (unless (packlet--hook-enable-entry-p value)
+      (error "packlet: invalid entry %S for :hook-enable" value))
+    (let ((hook (nth 0 value))
+          (function (nth 1 value))
+          (arg (if (null (cddr value))
+                   1
+                 (nth 2 value))))
+      (list :kind :hook-enable
+            :hook hook
+            :function `(lambda ()
+                         (funcall ',function ,arg))
+            :delay nil
+            :depth 0
+            :local nil)))
+
+  (defun packlet--normalize-hook-enables (forms)
+    "Normalize FORMS under `:hook-enable' into a flat list of hook entries."
+    (packlet--normalize-entries
+     forms :hook-enable
+     #'packlet--hook-enable-entry-p
+     #'packlet--normalize-hook-enable-entry))
 
   (defun packlet--autoload-entry-p (value)
     "Return non-nil when VALUE is a valid `:autoload' tuple entry.

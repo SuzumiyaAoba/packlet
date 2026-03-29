@@ -127,7 +127,11 @@
                  (packlet--normalize-hooks
                   (packlet--section sections :hook))
                  (packlet--normalize-hook-setqs
-                  (packlet--section sections :hook-setq))))
+                  (packlet--section sections :hook-setq))
+                 (packlet--normalize-hook-adds
+                  (packlet--section sections :hook-add))
+                 (packlet--normalize-hook-enables
+                  (packlet--section sections :hook-enable))))
          (bindings (packlet--normalize-bindings
                     (packlet--section sections :bind)))
          (keymap-bindings (packlet--normalize-bindings

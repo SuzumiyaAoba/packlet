@@ -12,9 +12,24 @@
   (require 'packlet-test-support))
 
 (defvar packlet-test-hook-count)
+(defvar packlet-test-hook-add-count)
+(defvar packlet-test-hook-enable-mode nil)
 
 (declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
 (declare-function packlet-test-major-mode-hook "packlet-test-multi-hook-feature" ())
+
+(define-minor-mode packlet-test-hook-enable-mode
+  "Minor mode used by `:hook-enable' tests.")
+
+(defun packlet-test-hook-add-target ()
+  "Increment `packlet-test-hook-add-count'."
+  (setq packlet-test-hook-add-count
+        (1+ packlet-test-hook-add-count)))
+
+(defun packlet-test-hook-enable-counter (&optional step)
+  "Increment `packlet-test-hook-count' by STEP."
+  (setq packlet-test-hook-count
+        (+ packlet-test-hook-count (or step 1))))
 
 (ert-deftest packlet-test-multiple-hooks-register-and-run ()
   (let* ((directory (make-temp-file "packlet-test-" t))
@@ -286,6 +301,65 @@
           (should (= packlet-test-hook-count 1))))
     (setq packlet-test-hook-count nil)
     (packlet-test--cleanup-symbols '(packlet-test-hook-setq-reeval-hook))))
+
+(ert-deftest packlet-test-hook-add-registers-local-hook ()
+  (defvar packlet-test-hook-add-source-hook nil)
+  (defvar packlet-test-hook-add-target-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-add-source-hook nil
+              packlet-test-hook-add-target-hook nil
+              packlet-test-hook-add-count 0)
+        (eval
+         '(packlet packlet-test-hook-add-feature
+            :hook-add ((packlet-test-hook-add-source-hook
+                        packlet-test-hook-add-target-hook
+                        packlet-test-hook-add-target
+                        :local t))))
+        (with-temp-buffer
+          (run-hooks 'packlet-test-hook-add-source-hook)
+          (run-hooks 'packlet-test-hook-add-target-hook)
+          (should (= packlet-test-hook-add-count 1)))
+        (with-temp-buffer
+          (run-hooks 'packlet-test-hook-add-target-hook)
+          (should (= packlet-test-hook-add-count 1))))
+    (setq packlet-test-hook-add-count nil)
+    (packlet-test--cleanup-symbols
+     '(packlet-test-hook-add-source-hook packlet-test-hook-add-target-hook))))
+
+(ert-deftest packlet-test-hook-enable-runs-mode-like-function ()
+  (defvar packlet-test-hook-enable-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-enable-hook nil)
+        (with-temp-buffer
+          (setq packlet-test-hook-enable-mode nil)
+          (eval
+           '(packlet packlet-test-hook-enable-feature
+              :hook-enable ((packlet-test-hook-enable-hook
+                             packlet-test-hook-enable-mode))))
+          (run-hooks 'packlet-test-hook-enable-hook)
+          (should packlet-test-hook-enable-mode)))
+    (packlet-test--cleanup-symbols '(packlet-test-hook-enable-hook))))
+
+(ert-deftest packlet-test-hook-enable-reeval-does-not-duplicate ()
+  (defvar packlet-test-hook-enable-reeval-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-enable-reeval-hook nil
+              packlet-test-hook-count 0)
+        (eval
+         '(packlet packlet-test-hook-enable-reeval-feature
+            :hook-enable ((packlet-test-hook-enable-reeval-hook
+                           packlet-test-hook-enable-counter))))
+        (eval
+         '(packlet packlet-test-hook-enable-reeval-feature
+            :hook-enable ((packlet-test-hook-enable-reeval-hook
+                           packlet-test-hook-enable-counter))))
+        (run-hooks 'packlet-test-hook-enable-reeval-hook)
+        (should (= packlet-test-hook-count 1)))
+    (setq packlet-test-hook-count nil)
+    (packlet-test--cleanup-symbols '(packlet-test-hook-enable-reeval-hook))))
 
 (ert-deftest packlet-test-delayed-hook-reeval-does-not-duplicate ()
   (let* ((scheduled nil)
