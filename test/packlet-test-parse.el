@@ -23,6 +23,79 @@
       (:commands command-a (command-b command-c))
       (:config (message "configured"))))))
 
+(ert-deftest packlet-test-file-form-validates-inputs ()
+  (should (equal (packlet--file-form nil 'packlet-test-default-file)
+                 "packlet-test-default-file"))
+  (should (equal (packlet--file-form '((:file packlet-test-library))
+                                     'packlet-test-default-file)
+                 "packlet-test-library"))
+  (should (equal (packlet--file-form '((:file "packlet-test-library"))
+                                     'packlet-test-default-file)
+                 "packlet-test-library"))
+  (should-error (packlet--file-form '((:file))
+                                    'packlet-test-default-file))
+  (should-error (packlet--file-form '((:file 42))
+                                    'packlet-test-default-file))
+  (should-error (packlet--file-form '((:file packlet-test-library "extra"))
+                                    'packlet-test-default-file)))
+
+(ert-deftest packlet-test-demand-and-idle-forms-validate-arity ()
+  (should (eq (packlet--demand-form '((:demand))) t))
+  (should (equal (packlet--demand-form '((:demand (featurep 'foo))))
+                 '(featurep 'foo)))
+  (should-error (packlet--demand-form '((:demand t nil))))
+  (should (eq (packlet--idle-form '((:idle))) t))
+  (should (= (packlet--idle-form '((:idle 2.5))) 2.5))
+  (should-error (packlet--idle-form '((:idle 1 2)))))
+
+(ert-deftest packlet-test-idle-delay-validates-values ()
+  (should-not (packlet--idle-delay nil))
+  (should (= (packlet--idle-delay t) 1.0))
+  (should (= (packlet--idle-delay 0) 0))
+  (should (= (packlet--idle-delay 2.5) 2.5))
+  (should-error (packlet--idle-delay -1))
+  (should-error (packlet--idle-delay 'later)))
+
+(ert-deftest packlet-test-keyword-options-parse-and-split ()
+  (let ((bool-p (lambda (value) (memq value '(nil t)))))
+    (should
+     (equal
+      (packlet--parse-keyword-options
+       '(:append t :depth -10)
+       `((:append . ,bool-p)
+         (:depth . numberp))
+       "hook")
+      '((:append . t) (:depth . -10))))
+    (should
+     (equal
+      (packlet--split-trailing-keyword-options
+       '(packlet-test-hook-enable-counter 2 :delay 0.5 :local t)
+       '((:delay . numberp)
+         (:local . nil))
+       "hook-call")
+      (cons '(packlet-test-hook-enable-counter 2)
+            '(:delay 0.5 :local t))))
+    (should-error
+     (packlet--parse-keyword-options
+      '(append t)
+      `((:append . ,bool-p))
+      "hook"))
+    (should-error
+     (packlet--parse-keyword-options
+      '(:append)
+      `((:append . ,bool-p))
+      "hook"))
+    (should-error
+     (packlet--parse-keyword-options
+      '(:bogus t)
+      `((:append . ,bool-p))
+      "hook"))
+    (should-error
+     (packlet--parse-keyword-options
+      '(:append maybe)
+      `((:append . ,bool-p))
+      "hook"))))
+
 (ert-deftest packlet-test-normalize-hooks-with-options ()
   (should
    (equal
@@ -113,6 +186,63 @@
        :delay nil
        :depth 0
        :local nil)))))
+
+(ert-deftest packlet-test-normalize-autoloads-accepts-mixed-forms ()
+  (should
+   (equal
+    (packlet--normalize-autoloads
+     '(packlet-test-autoload-a
+       (packlet-test-autoload-b packlet-test-autoload-c)
+       (packlet-test-autoload-d "packlet-test-d")
+       ((packlet-test-autoload-e "packlet-test-e" t))))
+    '((packlet-test-autoload-a nil nil)
+      (packlet-test-autoload-b nil nil)
+      (packlet-test-autoload-c nil nil)
+      (packlet-test-autoload-d "packlet-test-d" nil)
+      (packlet-test-autoload-e "packlet-test-e" t))))
+  (should-error
+   (packlet--normalize-autoloads
+    '((42 "packlet-test-invalid")))))
+
+(ert-deftest packlet-test-normalize-bindings-expands-map-groups ()
+  (should
+   (equal
+    (packlet--normalize-bindings
+     '((:map packlet-test-parent-map
+        ([f5] . packlet-test-command)
+        ("C-c p" . packlet-test-prefix-command))
+       ("C-c z" . packlet-test-global-command)))
+    '((:map packlet-test-parent-map [f5] packlet-test-command)
+      (:map packlet-test-parent-map "C-c p" packlet-test-prefix-command)
+      (:global "C-c z" packlet-test-global-command))))
+  (should-error
+   (packlet--normalize-bindings
+    '((:map packlet-test-parent-map invalid)))))
+
+(ert-deftest packlet-test-normalize-faces-accepts-copy-only-entry ()
+  (should
+   (equal
+    (packlet--normalize-faces
+     '((packlet-test-face :copy mode-line)))
+    '((:face packlet-test-face :copy mode-line :attributes nil))))
+  (should-error
+   (packlet--normalize-faces
+    '((packlet-test-face)))))
+
+(ert-deftest packlet-test-normalize-derived-modes-preserves-docstring-and-body ()
+  (should
+   (equal
+    (packlet--normalize-derived-modes
+     '((packlet-test-derived text-mode "Derived"
+        "Derived mode docstring."
+        (setq-local fill-column 88)
+        (setq-local tab-width 4))))
+    '((:mode packlet-test-derived
+       :parent text-mode
+       :name "Derived"
+       :docstring "Derived mode docstring."
+       :body ((setq-local fill-column 88)
+              (setq-local tab-width 4)))))))
 
 (ert-deftest packlet-test-user-defined-keyword ()
   (defvar packlet-test-user-kw-result nil)

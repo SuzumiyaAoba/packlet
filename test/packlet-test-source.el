@@ -51,6 +51,63 @@
         (packlet--run-source-entry-cleanups failed scope)
         (should (equal calls '(:last :first :recovered)))))))
 
+(ert-deftest packlet-test-resolve-source-scope-normalizes-file-and-buffer-inputs ()
+  (let ((source-file (make-temp-file "packlet-test-resolve-source-" nil ".el"))
+        (buffer (generate-new-buffer " *packlet-test-resolve-source*")))
+    (unwind-protect
+        (progn
+          (should (equal (packlet--resolve-source-scope source-file)
+                         (list :file (expand-file-name source-file))))
+          (with-current-buffer buffer
+            (setq buffer-file-name source-file)
+            (should (equal (packlet--resolve-source-scope nil)
+                           (list :file (expand-file-name source-file)))))
+          (with-current-buffer buffer
+            (setq buffer-file-name nil)
+            (should (equal (packlet--resolve-source-scope buffer)
+                           (list :buffer buffer)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-display-source-entries-hides-internal-site-feature ()
+  (let* ((site '(load "/tmp/packlet-test-source.el" 1))
+         (entries
+          (list
+           (packlet--make-source-entry
+            :id (list :site-feature site 'packlet-test-feature)
+            :install #'ignore
+            :cleanup #'ignore)
+           (packlet--make-source-entry
+            :id (list :after-load 'packlet-test-dependency 'handler)
+            :install #'ignore
+            :cleanup #'ignore)
+           (packlet--make-source-entry
+            :id (list :idle (list site :idle))
+            :install #'ignore
+            :cleanup #'ignore)
+           (packlet--make-source-entry
+            :id (list :keymap (list site :bind-keymap 0))
+            :install #'ignore
+            :cleanup #'ignore)
+           (packlet--make-source-entry
+            :id (list site :hook 0)
+            :install #'ignore
+            :cleanup #'ignore)))
+         (displayed (packlet--display-source-entries entries)))
+    (should (equal (mapcar #'packlet--source-entry-kind entries)
+                   '(:site-feature
+                     :after-load-handler
+                     :idle-loader
+                     :keymap-binding
+                     :hook)))
+    (should (= (length displayed) 4))
+    (should-not
+     (cl-find :site-feature displayed
+              :key #'packlet--source-entry-kind
+              :test #'eq))))
+
 (ert-deftest packlet-test-source-session-preserves-old-cleanup-failures-on-success ()
   (let ((scope '(:buffer keep-failed-buffer))
         (warnings nil))
@@ -199,6 +256,17 @@
         (kill-buffer buffer))
       (setq packlet-test-hook-count nil)
       (packlet-test--cleanup-symbols '(packlet-test-buffer-scope-hook)))))
+
+(ert-deftest packlet-test-describe-source-empty-buffer-scope ()
+  (let ((buffer (generate-new-buffer " *packlet-test-empty-source*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (let ((description (packlet-describe-source buffer)))
+            (should (string-match-p "Buffer:  \\*packlet-test-empty-source\\*" description))
+            (should (string-match-p "Entries: 0" description))
+            (should (string-match-p "- none" description))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest packlet-test-describe-source-file-scope ()
   (let ((source-file (make-temp-file "packlet-test-describe-" nil ".el")))
