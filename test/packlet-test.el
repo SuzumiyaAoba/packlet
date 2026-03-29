@@ -33,9 +33,11 @@
 (defvar packlet-test-list-a nil)
 (defvar packlet-test-list-b nil)
 (defvar packlet-test-compare-list nil)
+(defvar packlet-test-alist nil)
 (defvar packlet-test-managed-list nil)
 (defvar packlet-test-prefix-keyword-map nil)
 (defvar packlet-test-prefix-map-remove-map nil)
+(defvar packlet-test-enable-mode nil)
 (defvar packlet-test-tracked-setq 0)
 (defcustom packlet-test-tracked-custom 0
   "User option used by `packlet' setting tests."
@@ -47,6 +49,7 @@
 (declare-function packlet-test-major-mode-hook "packlet-test-multi-hook-feature" ())
 (declare-function packlet-test-al-custom-file "packlet-test-al-lib" ())
 (declare-function packlet-test-advised-target nil ())
+(declare-function packlet-test-enable-mode nil (&optional arg))
 
 (defun packlet-test--write-file (file contents)
   "Write CONTENTS to FILE."
@@ -903,7 +906,15 @@
         (delete-file source-file)))))
 
 (ert-deftest packlet-test-list-features-shows-registered-features ()
-  (let ((source-file (make-temp-file "packlet-test-list-features-" nil ".el")))
+  (let ((source-file (make-temp-file "packlet-test-list-features-" nil ".el"))
+        (packlet--site-features (make-hash-table :test #'equal))
+        (packlet--file-source-states (make-hash-table :test #'equal))
+        (packlet--buffer-source-states (make-hash-table :test #'eq :weakness 'key))
+        (packlet--after-load-handlers (make-hash-table :test #'eq))
+        (packlet--after-load-dispatchers (make-hash-table :test #'eq))
+        (packlet--idle-load-states (make-hash-table :test #'equal))
+        (packlet--expansion-load-states (make-hash-table :test #'equal))
+        (after-load-alist nil))
     (unwind-protect
         (progn
           (with-temp-buffer
@@ -1795,6 +1806,87 @@
           (should (equal packlet-test-managed-list '(99 2))))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
+
+(ert-deftest packlet-test-list-keyword ()
+  (let ((packlet-test-list-a '(2)))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (packlet packlet-test-list-feature
+        :list (packlet-test-list-a 1))
+      (should (equal packlet-test-list-a '(1 2))))))
+
+(ert-deftest packlet-test-alist-keyword-compares-by-car ()
+  (let ((packlet-test-alist '(("alpha" . 1))))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (packlet packlet-test-alist-feature
+        :alist (packlet-test-alist '("alpha" . 2)))
+      (should (equal packlet-test-alist '(("alpha" . 1)))))))
+
+(ert-deftest packlet-test-enable-keyword ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-enable-feature))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols '(packlet-test-enable-mode))
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-enable-mode nil)\n\
+(defun packlet-test-enable-mode (&optional arg)\n\
+  (setq packlet-test-enable-mode\n\
+        (if (memq arg '(0 -1 nil)) nil arg)))")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (eval
+             `(packlet ,feature
+                :enable (packlet-test-enable-mode 'deferred)
+                :demand t))
+            (should (featurep feature))
+            (should (eq packlet-test-enable-mode 'deferred))))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols '(packlet-test-enable-mode))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-enable-reeval-removal-preserves-later-change ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-enable-remove-feature)
+         (source-file (make-temp-file "packlet-test-enable-remove-" nil ".el")))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols '(packlet-test-enable-mode))
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-enable-mode nil)\n\
+(defun packlet-test-enable-mode (&optional arg)\n\
+  (setq packlet-test-enable-mode\n\
+        (if (memq arg '(0 -1 nil)) nil arg)))")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert (format "(packlet %S\n  :enable packlet-test-enable-mode\n  :demand t)\n"
+                            feature))
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (eq packlet-test-enable-mode 1))
+          (packlet-test-enable-mode 'manual)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (eq packlet-test-enable-mode 'manual)))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols '(packlet-test-enable-mode))
+      (when (file-exists-p source-file)
+        (delete-file source-file))
+      (delete-directory directory t))))
 
 (ert-deftest packlet-test-prefix-map-keyword-creates-and-loads-prefix-map ()
   (let* ((directory (make-temp-file "packlet-test-" t))

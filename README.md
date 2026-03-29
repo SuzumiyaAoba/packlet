@@ -14,6 +14,7 @@ It focuses on the common parts of package configuration:
 - wiring hooks, global key bindings, and package keymaps
 - defining prefix keymaps for package-local bindings
 - wiring lazy prefix-key keymaps
+- enabling mode-like functions after their feature loads
 - registering function advice
 - deferring configuration until a feature is actually loaded
 - warming up a feature after startup during idle time
@@ -72,10 +73,11 @@ Clone this repository and add it to `load-path`:
 `packlet` treats reevaluation as a first-class workflow.
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
-  `:setq`, `:custom`, `:add-to-list`, `:config`, `:hook`, `:bind`,
-  `:bind-keymap`, `:prefix-map`, `:advice`, `:mode`, `:interpreter`,
-  `:magic`, `:magic-fallback`, `:after-load`, `:idle`, and `:demand`
-  registrations from that source instead of stacking duplicates.
+  `:setq`, `:custom`, `:add-to-list`, `:list`, `:alist`, `:config`,
+  `:hook`, `:bind`, `:bind-keymap`, `:prefix-map`, `:enable`, `:advice`,
+  `:mode`, `:interpreter`, `:magic`, `:magic-fallback`, `:after-load`,
+  `:idle`, and `:demand` registrations from that source instead of stacking
+  duplicates.
 - File-backed reevaluation is transactional. If the new evaluation fails part
   way through, `packlet` restores the previously working registrations.
 - Direct `eval` is also tracked. In Lisp buffers, nested forms containing
@@ -109,9 +111,15 @@ Clone this repository and add it to `load-path`:
   Load helper libraries immediately. If a library cannot be found, `packlet`
   emits a warning.
 - `:add-to-list`
+  Lower-level alias for `:list`.
+- `:list`
   `(variable element)` forms applied immediately with `add-to-list`.
   List-style entries additionally accept `:append` and `:compare`, for
   example `(completion-at-point-functions #'cape-file :append t)`.
+- `:alist`
+  `(variable element)` forms applied immediately with `add-to-list`, using
+  the entry key (`car`) as the default equality check.  This is useful for
+  alists such as `display-buffer-alist`.
 - `:config`
   Forms evaluated once after the feature and every `:after` dependency are
   loaded.
@@ -152,6 +160,11 @@ Clone this repository and add it to `load-path`:
   Symbols naming sparse keymaps that should be created when still unbound.
   This is useful together with `:bind-keymap` and `:bind (:map ...)` when a
   package uses a config-owned prefix map.
+- `:enable`
+  Symbols naming mode-like functions to call after the feature and every
+  `:after` dependency are loaded.  A bare symbol calls the function with `1`.
+  A tuple `(function arg)` calls it with `arg`, for example
+  `(treemacs-git-mode 'deferred)`.
 - `:advice`
   `(target how function)` entries added with `advice-add`.
   List-style entries additionally accept `:name` and `:depth`, for example

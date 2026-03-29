@@ -1122,12 +1122,16 @@ the first matching entry.  When COMPARE-FN is non-nil, use it for matching."
         result
       (nreverse result))))
 
+(defun packlet--alist-entry-key-equal-p (left right)
+  "Return non-nil when LEFT and RIGHT share the same alist key."
+  (equal (car-safe left) (car-safe right)))
+
 (eval-and-compile
   (defconst packlet--keywords
-    '(:file :init :setq :custom :load :add-to-list :config :commands :autoload
-            :mode :hook :bind :bind-keymap :prefix-map :advice :interpreter
-            :magic :after :after-load :idle :magic-fallback :demand
-            :functions :defines))
+    '(:file :init :setq :custom :load :add-to-list :list :alist :config
+            :commands :autoload :mode :hook :bind :bind-keymap :prefix-map
+            :enable :advice :interpreter :magic :after :after-load :idle
+            :magic-fallback :demand :functions :defines))
 
   (defvar packlet--user-keywords nil
     "Alist of (KEYWORD . PLIST) for user-defined keywords.
@@ -1543,38 +1547,89 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
           (error "packlet: invalid value %S for :bind" form))))
       (nreverse result)))
 
-  (defun packlet--normalize-add-to-list-options (options)
-    "Normalize `:add-to-list' OPTIONS into a plist."
-    (let ((parsed (packlet--parse-keyword-options
-                   options
-                   '((:append  . nil)
-                     (:compare . nil))
-                   "add-to-list")))
-      (list :append  (alist-get :append parsed)
-            :compare (alist-get :compare parsed))))
+  (defun packlet--normalize-list-options (options keyword)
+    "Normalize KEYWORD OPTIONS into a plist."
+    (let ((context (substring (symbol-name keyword) 1)))
+      (let ((parsed (packlet--parse-keyword-options
+                     options
+                     '((:append  . nil)
+                       (:compare . nil))
+                     context)))
+        (list :append  (alist-get :append parsed)
+              :compare (alist-get :compare parsed)))))
 
-  (defun packlet--normalize-add-to-list-entry (value)
-    "Normalize a single `:add-to-list' VALUE into a plist."
+  (defun packlet--normalize-list-entry (value keyword &optional default-compare)
+    "Normalize a single KEYWORD VALUE into a plist.
+When DEFAULT-COMPARE is non-nil, use it when VALUE does not provide
+an explicit `:compare' option."
     (unless (packlet--proper-list-p value)
-      (error "packlet: invalid entry %S for :add-to-list" value))
+      (error "packlet: invalid entry %S for %S" value keyword))
     (let ((variable (car value))
           (rest (cdr value)))
       (unless (symbolp variable)
-        (error "packlet: invalid entry %S for :add-to-list" value))
+        (error "packlet: invalid entry %S for %S" value keyword))
       (unless rest
-        (error "packlet: invalid entry %S for :add-to-list" value))
-      (append
-       (list :variable variable
-             :element (car rest))
-       (packlet--normalize-add-to-list-options (cdr rest)))))
+        (error "packlet: invalid entry %S for %S" value keyword))
+      (let ((options
+             (packlet--normalize-list-options (cdr rest) keyword)))
+        (when (and default-compare
+                   (null (plist-get options :compare)))
+          (setq options
+                (plist-put options :compare default-compare)))
+        (append
+         (list :kind keyword
+               :variable variable
+               :element (car rest))
+         options))))
+
+  (defun packlet--normalize-lists (forms keyword &optional default-compare)
+    "Normalize FORMS under KEYWORD into a flat list of entries."
+    (packlet--normalize-entries
+     forms keyword
+     (lambda (f) (and (packlet--proper-list-p f)
+                      (symbolp (car-safe f))))
+     (lambda (entry)
+       (packlet--normalize-list-entry entry keyword default-compare))))
 
   (defun packlet--normalize-add-to-lists (forms)
     "Normalize FORMS under `:add-to-list' into a flat list of entries."
+    (packlet--normalize-lists forms :add-to-list))
+
+  (defun packlet--normalize-lists-alias (forms)
+    "Normalize FORMS under `:list' into a flat list of entries."
+    (packlet--normalize-lists forms :list))
+
+  (defun packlet--normalize-alists (forms)
+    "Normalize FORMS under `:alist' into a flat list of entries."
+    (packlet--normalize-lists
+     forms
+     :alist
+     '(function packlet--alist-entry-key-equal-p)))
+
+  (defun packlet--normalize-enable-entry (value)
+    "Normalize a single `:enable' VALUE into a plist."
+    (cond
+     ((symbolp value)
+      (list :function value
+            :arg 1))
+     ((and (packlet--proper-list-p value)
+           (symbolp (car-safe value))
+           (consp (cdr value))
+           (null (cddr value)))
+      (list :function (car value)
+            :arg (cadr value)))
+     (t
+      (error "packlet: invalid entry %S for :enable" value))))
+
+  (defun packlet--normalize-enables (forms)
+    "Normalize FORMS under `:enable' into a flat list of entries."
     (packlet--normalize-entries
-     forms :add-to-list
-     (lambda (f) (and (packlet--proper-list-p f)
-                      (symbolp (car-safe f))))
-     #'packlet--normalize-add-to-list-entry))
+     forms :enable
+     (lambda (f)
+       (or (symbolp f)
+           (and (packlet--proper-list-p f)
+                (symbolp (car-safe f)))))
+     #'packlet--normalize-enable-entry))
 
   (defun packlet--normalize-advice-options (options)
     "Normalize `:advice' OPTIONS into a plist."
@@ -1832,8 +1887,13 @@ Example:
                         (packlet--section sections :custom)))
          (load-libs (packlet--normalize-loads
                      (packlet--section sections :load)))
-         (add-to-lists (packlet--normalize-add-to-lists
-                        (packlet--section sections :add-to-list)))
+         (add-to-lists (append
+                        (packlet--normalize-add-to-lists
+                         (packlet--section sections :add-to-list))
+                        (packlet--normalize-lists-alias
+                         (packlet--section sections :list))
+                        (packlet--normalize-alists
+                         (packlet--section sections :alist))))
          (config-forms (packlet--section sections :config))
          (commands (packlet--normalize-symbols
                     (packlet--section sections :commands)
@@ -1865,6 +1925,8 @@ Example:
          (prefix-maps (packlet--normalize-symbols
                        (packlet--section sections :prefix-map)
                        :prefix-map))
+         (enables (packlet--normalize-enables
+                   (packlet--section sections :enable)))
          (advices (packlet--normalize-advices
                    (packlet--section sections :advice)))
          (afters (packlet--normalize-symbols
@@ -1929,6 +1991,7 @@ Example:
           for index from 0
           append
           (let* ((variable (plist-get entry :variable))
+                 (kind (plist-get entry :kind))
                  (element (plist-get entry :element))
                  (append-form (plist-get entry :append))
                  (compare-form (plist-get entry :compare))
@@ -1969,7 +2032,7 @@ Example:
               (defvar ,added-var nil)
               (packlet--register-source-entry
                ',source-scope
-               ',(list site :add-to-list index)
+               ',(list site kind index)
                (lambda ()
                  (setq ,value-var ,element
                        ,append-var ,append-form
@@ -2000,6 +2063,92 @@ Example:
                  (packlet--unbind-variable ',compare-var)
                  (packlet--unbind-variable ',had-value-var)
                  (packlet--unbind-variable ',added-var))))))
+       ,@(cl-loop
+          for entry in enables
+          for index from 0
+          append
+          (let* ((function (plist-get entry :function))
+                 (arg-form (plist-get entry :arg))
+                 (applied-var
+                  (packlet--generated-symbol
+                   "packlet--enable-applied"
+                   feature
+                   site
+                   (format "enable-%d" index)))
+                 (had-value-var
+                  (packlet--generated-symbol
+                   "packlet--enable-bound"
+                   feature
+                   site
+                   (format "enable-%d" index)))
+                 (previous-value-var
+                  (packlet--generated-symbol
+                   "packlet--enable-previous"
+                   feature
+                   site
+                   (format "enable-%d" index)))
+                 (enabled-value-var
+                  (packlet--generated-symbol
+                   "packlet--enable-current"
+                   feature
+                   site
+                   (format "enable-%d" index)))
+                 (enable-function
+                  (packlet--generated-symbol
+                   "packlet--enable"
+                   feature
+                   site
+                   (format "enable-%d" index))))
+            `((defvar ,applied-var nil)
+              (defvar ,had-value-var nil)
+              (defvar ,previous-value-var nil)
+              (defvar ,enabled-value-var nil)
+              (packlet--register-source-entry
+               ',source-scope
+               ',(list site :enable-state index)
+               (lambda ()
+                 (setq ,applied-var nil)
+                 (packlet--unbind-variable ',had-value-var)
+                 (packlet--unbind-variable ',previous-value-var)
+                 (packlet--unbind-variable ',enabled-value-var)
+                 (defalias ',enable-function
+                   (lambda ()
+                     (when (and (not ,applied-var)
+                                (featurep ',feature)
+                                (packlet--all-features-loaded-p ',afters))
+                       (setq ,applied-var t
+                             ,had-value-var (boundp ',function))
+                       (if ,had-value-var
+                           (setq ,previous-value-var ,function)
+                         (packlet--unbind-variable ',previous-value-var))
+                       (funcall ',function ,arg-form)
+                       (unless (boundp ',function)
+                         (error "packlet: %S did not leave a mode variable bound"
+                                ',function))
+                       (setq ,enabled-value-var ,function)))))
+               (lambda ()
+                 (when (and ,applied-var
+                            (boundp ',function)
+                            (equal ,function ,enabled-value-var))
+                   (funcall ',function
+                            (if (and ,had-value-var ,previous-value-var)
+                                ,previous-value-var
+                              0))
+                   (when (and (not ,had-value-var)
+                              (boundp ',function)
+                              (null ,function))
+                     (makunbound ',function)))
+                 (packlet--unbind-variable ',applied-var)
+                 (packlet--unbind-variable ',had-value-var)
+                 (packlet--unbind-variable ',previous-value-var)
+                 (packlet--unbind-variable ',enabled-value-var)
+                 (packlet--unbind-function ',enable-function)))
+              (packlet--register-after-load
+               ',(list site :enable index)
+               ',feature
+               ',enable-function
+               ',afters
+               ,source-file))))
        ,@(cl-loop
           for prefix-map in prefix-maps
           for index from 0
