@@ -1090,19 +1090,27 @@ restore the previous binding even when KEY no longer points at COMMAND."
         (append (listify-key-sequence (this-command-keys-vector))
                 unread-command-events)))
 
+(defun packlet--unbind-variable (symbol)
+  "Unbind SYMBOL if it is currently bound as a variable."
+  (when (boundp symbol)
+    (makunbound symbol)))
+
+(defun packlet--unbind-function (symbol)
+  "Remove SYMBOL's function definition if it has one."
+  (when (fboundp symbol)
+    (fmakunbound symbol)))
+
 (defun packlet--list-member-p (element list &optional compare-fn)
   "Return non-nil when ELEMENT is present in LIST.
 When COMPARE-FN is non-nil, use it as the equality predicate."
-  (if compare-fn
-      (cl-member element list :test compare-fn)
-    (member element list)))
+  (cl-member element list :test (or compare-fn #'equal)))
 
 (defun packlet--remove-list-entry (element list &optional append compare-fn)
   "Remove one ELEMENT from LIST and return the new list.
 When APPEND is non-nil, remove the last matching entry.  Otherwise remove
 the first matching entry.  When COMPARE-FN is non-nil, use it for matching."
   (let* ((test (or compare-fn #'equal))
-         (items (if append (reverse (copy-sequence list)) list))
+         (items (if append (reverse list) list))
          removed
          result)
     (dolist (item items)
@@ -1110,10 +1118,9 @@ the first matching entry.  When COMPARE-FN is non-nil, use it for matching."
                (funcall test element item))
           (setq removed t)
         (push item result)))
-    (setq result (nreverse result))
     (if append
-        (nreverse result)
-      result)))
+        result
+      (nreverse result))))
 
 (eval-and-compile
   (defconst packlet--keywords
@@ -1313,37 +1320,44 @@ Each PLIST may contain:
         (and (consp value)
              (eq (car value) 'lambda))))
 
-  (defun packlet--normalize-hook-options (options)
-    "Normalize `:hook' OPTIONS into a plist."
-    (let (append depth local)
+  (defun packlet--parse-keyword-options (options spec context)
+    "Parse keyword OPTIONS according to SPEC, reporting errors for CONTEXT.
+SPEC is an alist of (KEYWORD . VALIDATOR) where VALIDATOR is nil (accept any
+value) or a predicate that returns non-nil for valid values.
+CONTEXT is a string used in error messages.
+Returns an alist of (KEYWORD . VALUE) for recognized keywords."
+    (let (result)
       (while options
         (let ((key (pop options)))
           (unless (keywordp key)
-            (error "packlet: invalid hook option %S" key))
+            (error "packlet: invalid %s option %S" context key))
           (unless options
-            (error "packlet: missing value for hook option %S" key))
-          (let ((value (pop options)))
-            (pcase key
-              (:append
-               (unless (memq value '(nil t))
-                 (error "packlet: :append for :hook must be nil or t, got %S"
-                        value))
-               (setq append value))
-              (:depth
-               (unless (numberp value)
-                 (error "packlet: :depth for :hook must be a number, got %S"
-                        value))
-               (setq depth value))
-              (:local
-               (unless (memq value '(nil t))
-                 (error "packlet: :local for :hook must be nil or t, got %S"
-                        value))
-               (setq local value))
-              (_
-               (error "packlet: unsupported hook option %S" key))))))
-      (list :depth (or depth
-                       (if append 90 0))
-            :local local)))
+            (error "packlet: missing value for %s option %S" context key))
+          (let* ((value (pop options))
+                 (entry (assq key spec)))
+            (unless entry
+              (error "packlet: unsupported %s option %S" context key))
+            (let ((validator (cdr entry)))
+              (when (and validator
+                         (not (funcall validator value)))
+                (error "packlet: %S for :%s must satisfy %S, got %S"
+                       key context validator value)))
+            (push (cons key value) result))))
+      (nreverse result)))
+
+  (defun packlet--normalize-hook-options (options)
+    "Normalize `:hook' OPTIONS into a plist."
+    (let* ((bool-p (lambda (v) (memq v '(nil t))))
+           (parsed (packlet--parse-keyword-options
+                    options
+                    `((:append . ,bool-p)
+                      (:depth  . numberp)
+                      (:local  . ,bool-p))
+                    "hook"))
+           (append (alist-get :append parsed))
+           (depth  (alist-get :depth parsed)))
+      (list :depth (or depth (if append 90 0))
+            :local (alist-get :local parsed))))
 
   (defun packlet--normalize-hook-entry (value)
     "Normalize a single `:hook' VALUE into a plist."
@@ -1437,22 +1451,32 @@ DELAY must be a non-negative number."
           (error "packlet: invalid value %S for %S" form keyword))))
       (nreverse result)))
 
-  (defun packlet--normalize-hooks (forms)
-    "Normalize FORMS under `:hook' into a flat list of hook entries.
-Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
+  (defun packlet--normalize-entries (forms keyword single-entry-p normalize-entry)
+    "Normalize FORMS for KEYWORD into a flat list.
+SINGLE-ENTRY-P is a predicate that returns non-nil when a form is a single
+entry rather than a list of entries.  NORMALIZE-ENTRY is called on each
+individual entry to produce its normalized form."
     (let (result)
       (dolist (form forms)
         (cond
-         ((or (packlet--hook-entry-p form)
-              (and (packlet--proper-list-p form)
-                   (symbolp (car-safe form))))
-          (push (packlet--normalize-hook-entry form) result))
+         ((funcall single-entry-p form)
+          (push (funcall normalize-entry form) result))
          ((packlet--proper-list-p form)
           (dolist (entry form)
-            (push (packlet--normalize-hook-entry entry) result)))
+            (push (funcall normalize-entry entry) result)))
          (t
-          (error "packlet: invalid value %S for :hook" form))))
+          (error "packlet: invalid value %S for %S" form keyword))))
       (nreverse result)))
+
+  (defun packlet--normalize-hooks (forms)
+    "Normalize FORMS under `:hook' into a flat list of hook entries.
+Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
+    (packlet--normalize-entries
+     forms :hook
+     (lambda (f) (or (packlet--hook-entry-p f)
+                     (and (packlet--proper-list-p f)
+                          (symbolp (car-safe f)))))
+     #'packlet--normalize-hook-entry))
 
   (defun packlet--autoload-entry-p (value)
     "Return non-nil when VALUE is a valid `:autoload' tuple entry.
@@ -1521,23 +1545,13 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
 
   (defun packlet--normalize-add-to-list-options (options)
     "Normalize `:add-to-list' OPTIONS into a plist."
-    (let (append compare)
-      (while options
-        (let ((key (pop options)))
-          (unless (keywordp key)
-            (error "packlet: invalid add-to-list option %S" key))
-          (unless options
-            (error "packlet: missing value for add-to-list option %S" key))
-          (let ((value (pop options)))
-            (pcase key
-              (:append
-               (setq append value))
-              (:compare
-               (setq compare value))
-              (_
-               (error "packlet: unsupported add-to-list option %S" key))))))
-      (list :append append
-            :compare compare)))
+    (let ((parsed (packlet--parse-keyword-options
+                   options
+                   '((:append  . nil)
+                     (:compare . nil))
+                   "add-to-list")))
+      (list :append  (alist-get :append parsed)
+            :compare (alist-get :compare parsed))))
 
   (defun packlet--normalize-add-to-list-entry (value)
     "Normalize a single `:add-to-list' VALUE into a plist."
@@ -1556,45 +1570,21 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
 
   (defun packlet--normalize-add-to-lists (forms)
     "Normalize FORMS under `:add-to-list' into a flat list of entries."
-    (let (result)
-      (dolist (form forms)
-        (cond
-         ((and (packlet--proper-list-p form)
-               (symbolp (car-safe form)))
-          (push (packlet--normalize-add-to-list-entry form) result))
-         ((packlet--proper-list-p form)
-          (dolist (entry form)
-            (push (packlet--normalize-add-to-list-entry entry) result)))
-         (t
-          (error "packlet: invalid value %S for :add-to-list" form))))
-      (nreverse result)))
+    (packlet--normalize-entries
+     forms :add-to-list
+     (lambda (f) (and (packlet--proper-list-p f)
+                      (symbolp (car-safe f))))
+     #'packlet--normalize-add-to-list-entry))
 
   (defun packlet--normalize-advice-options (options)
     "Normalize `:advice' OPTIONS into a plist."
-    (let (name depth)
-      (while options
-        (let ((key (pop options)))
-          (unless (keywordp key)
-            (error "packlet: invalid advice option %S" key))
-          (unless options
-            (error "packlet: missing value for advice option %S" key))
-          (let ((value (pop options)))
-            (pcase key
-              (:name
-               (unless (or (stringp value)
-                           (symbolp value))
-                 (error "packlet: :name for :advice must be a string or symbol, got %S"
-                        value))
-               (setq name value))
-              (:depth
-               (unless (numberp value)
-                 (error "packlet: :depth for :advice must be a number, got %S"
-                        value))
-               (setq depth value))
-              (_
-               (error "packlet: unsupported advice option %S" key))))))
-      (list :name name
-            :depth depth)))
+    (let ((parsed (packlet--parse-keyword-options
+                   options
+                   `((:name  . ,(lambda (v) (or (stringp v) (symbolp v))))
+                     (:depth . numberp))
+                   "advice")))
+      (list :name  (alist-get :name parsed)
+            :depth (alist-get :depth parsed))))
 
   (defun packlet--normalize-advice-entry (value)
     "Normalize a single `:advice' VALUE into a plist."
@@ -1618,18 +1608,11 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
 
   (defun packlet--normalize-advices (forms)
     "Normalize FORMS under `:advice' into a flat list of entries."
-    (let (result)
-      (dolist (form forms)
-        (cond
-         ((and (packlet--proper-list-p form)
-               (symbolp (car-safe form)))
-          (push (packlet--normalize-advice-entry form) result))
-         ((packlet--proper-list-p form)
-          (dolist (entry form)
-            (push (packlet--normalize-advice-entry entry) result)))
-         (t
-          (error "packlet: invalid value %S for :advice" form))))
-      (nreverse result)))
+    (packlet--normalize-entries
+     forms :advice
+     (lambda (f) (and (packlet--proper-list-p f)
+                      (symbolp (car-safe f))))
+     #'packlet--normalize-advice-entry))
 
   (defun packlet--expand-settings (kind feature site source-scope settings)
     "Expand SETTINGS for KIND in FEATURE at SITE under SOURCE-SCOPE."
@@ -1678,8 +1661,7 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
                   ,had-value-var (boundp ',variable))
             (if ,had-value-var
                 (setq ,previous-value-var ,variable)
-              (when (boundp ',previous-value-var)
-                (makunbound ',previous-value-var)))
+              (packlet--unbind-variable ',previous-value-var))
             ,install-form)
           (lambda ()
             (when (and (boundp ',variable)
@@ -1687,12 +1669,9 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
               (if ,had-value-var
                   ,restore-form
                 (makunbound ',variable)))
-            (when (boundp ',value-var)
-              (makunbound ',value-var))
-            (when (boundp ',had-value-var)
-              (makunbound ',had-value-var))
-            (when (boundp ',previous-value-var)
-              (makunbound ',previous-value-var))))))))
+            (packlet--unbind-variable ',value-var)
+            (packlet--unbind-variable ',had-value-var)
+            (packlet--unbind-variable ',previous-value-var)))))))
 
   (defun packlet--normalize-customs (forms)
     "Normalize FORMS under `:custom'."
@@ -2016,16 +1995,11 @@ Example:
                               (boundp ',variable)
                               (null ,variable))
                      (makunbound ',variable)))
-                 (when (boundp ',value-var)
-                   (makunbound ',value-var))
-                 (when (boundp ',append-var)
-                   (makunbound ',append-var))
-                 (when (boundp ',compare-var)
-                   (makunbound ',compare-var))
-                 (when (boundp ',had-value-var)
-                   (makunbound ',had-value-var))
-                 (when (boundp ',added-var)
-                   (makunbound ',added-var)))))))
+                 (packlet--unbind-variable ',value-var)
+                 (packlet--unbind-variable ',append-var)
+                 (packlet--unbind-variable ',compare-var)
+                 (packlet--unbind-variable ',had-value-var)
+                 (packlet--unbind-variable ',added-var))))))
        ,@(cl-loop
           for prefix-map in prefix-maps
           for index from 0
@@ -2068,8 +2042,7 @@ Example:
                    (set ',prefix-map ,created-var)
                    (if ,had-value-var
                        (setq ,previous-value-var nil)
-                     (when (boundp ',previous-value-var)
-                       (makunbound ',previous-value-var)))))
+                     (packlet--unbind-variable ',previous-value-var))))
                (lambda ()
                  (when (and ,created-var
                             (boundp ',prefix-map)
@@ -2077,12 +2050,9 @@ Example:
                    (if ,had-value-var
                        (setq ,prefix-map ,previous-value-var)
                      (makunbound ',prefix-map)))
-                 (when (boundp ',created-var)
-                   (makunbound ',created-var))
-                 (when (boundp ',had-value-var)
-                   (makunbound ',had-value-var))
-                 (when (boundp ',previous-value-var)
-                   (makunbound ',previous-value-var)))))))
+                 (packlet--unbind-variable ',created-var)
+                 (packlet--unbind-variable ',had-value-var)
+                 (packlet--unbind-variable ',previous-value-var))))))
        ,@(mapcar
           (lambda (command)
             `(packlet--maybe-autoload ',command ,file t))
@@ -2221,10 +2191,8 @@ Example:
                            (cancel-timer ,timer-var))
                          (makunbound ',timer-var))
                        ,@(when local
-                           `((when (boundp ',hook-buffer-var)
-                               (makunbound ',hook-buffer-var))))
-                       (when (fboundp ',hook-function)
-                         (fmakunbound ',hook-function))))))
+                           `((packlet--unbind-variable ',hook-buffer-var)))
+                       (packlet--unbind-function ',hook-function)))))
               `((progn
                   ,@(when local
                       `((defvar ,hook-buffer-var nil)))
@@ -2251,10 +2219,8 @@ Example:
                                (remove-hook ',hook-var ',hook-function t)))
                         `(remove-hook ',hook-var ',hook-function))
                      ,@(when local
-                         `((when (boundp ',hook-buffer-var)
-                             (makunbound ',hook-buffer-var))))
-                     (when (fboundp ',hook-function)
-                       (fmakunbound ',hook-function)))))))))
+                         `((packlet--unbind-variable ',hook-buffer-var)))
+                     (packlet--unbind-function ',hook-function))))))))
        ,@(cl-loop
           for binding in bindings
           for index from 0
@@ -2286,8 +2252,7 @@ Example:
                        (define-key global-map
                                    ,(packlet--key-form key)
                                    ,previous-binding-var))
-                     (when (boundp ',previous-binding-var)
-                       (makunbound ',previous-binding-var))))))
+                     (packlet--unbind-variable ',previous-binding-var)))))
               (`(:map ,keymap ,key ,command)
                `(progn
                   (packlet--maybe-autoload ',command ,file t)
@@ -2337,8 +2302,7 @@ Example:
                                         resolved-keymap)
                             (packlet--replay-command-keys)))))
                     (lambda ()
-                      (when (fboundp ',loader-command)
-                        (fmakunbound ',loader-command))))
+                      (packlet--unbind-function ',loader-command)))
                    (packlet--register-keymap-binding
                     ',binding-id
                     ',feature
@@ -2374,15 +2338,14 @@ Example:
                                       resolved-keymap)
                           (packlet--replay-command-keys)))))
                   (lambda ()
-                    (when (fboundp ',loader-command)
-                      (fmakunbound ',loader-command))))
+                    (packlet--unbind-function ',loader-command)))
                  (packlet--register-keymap-binding
                   ',binding-id
                   ',feature
                   ',target-keymap
                   ,(packlet--key-form key)
                   ',loader-command
-                 ',afters
+                  ',afters
                   ,source-file
                   (lambda (current _map)
                     (eq current
@@ -2416,8 +2379,7 @@ Example:
                  (advice-add ',symbol ',how ',advice-function ',props))
                (lambda ()
                  (advice-remove ',symbol ',advice-function)
-                 (when (fboundp ',advice-function)
-                   (fmakunbound ',advice-function)))))))
+                 (packlet--unbind-function ',advice-function))))))
        ,@(cl-loop
           for entry in after-loads
           for index from 0
@@ -2438,8 +2400,7 @@ Example:
                     (lambda ()
                       ,@(cdr entry))))
                 (lambda ()
-                  (when (fboundp ',after-load-function)
-                    (fmakunbound ',after-load-function))))
+                  (packlet--unbind-function ',after-load-function)))
                (packlet--register-after-load-handler
                 ',(car entry)
                 ',after-load-id
@@ -2470,10 +2431,8 @@ Example:
                       (setq ,configured-var t)
                       ,@config-forms))))
               (lambda ()
-                (when (boundp ',configured-var)
-                  (makunbound ',configured-var))
-                (when (fboundp ',config-function)
-                  (fmakunbound ',config-function))))
+                (packlet--unbind-variable ',configured-var)
+                (packlet--unbind-function ',config-function)))
              (packlet--register-after-load
               ',(list site :config)
               ',feature
