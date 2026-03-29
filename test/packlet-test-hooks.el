@@ -14,12 +14,16 @@
 (defvar packlet-test-hook-count)
 (defvar packlet-test-hook-add-count)
 (defvar packlet-test-hook-enable-mode nil)
+(defvar packlet-test-startup-enable-mode nil)
 
 (declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
 (declare-function packlet-test-major-mode-hook "packlet-test-multi-hook-feature" ())
 
 (define-minor-mode packlet-test-hook-enable-mode
   "Minor mode used by `:hook-enable' tests.")
+
+(define-minor-mode packlet-test-startup-enable-mode
+  "Minor mode used by `:startup-enable' tests.")
 
 (defun packlet-test-hook-add-target ()
   "Increment `packlet-test-hook-add-count'."
@@ -420,6 +424,53 @@
         (should (= packlet-test-hook-count 1)))
     (setq packlet-test-hook-count nil)
     (packlet-test--cleanup-symbols '(packlet-test-hook-enable-reeval-hook))))
+
+(ert-deftest packlet-test-startup-runs-on-after-init-hook ()
+  (let ((after-init-time nil)
+        (after-init-hook nil))
+    (setq packlet-test-hook-count 0)
+    (packlet packlet-test-startup-feature
+      :startup (packlet-test-hook-enable-counter 2))
+    (should (= packlet-test-hook-count 0))
+    (run-hooks 'after-init-hook)
+    (should (= packlet-test-hook-count 2))
+    (run-hooks 'after-init-hook)
+    (should (= packlet-test-hook-count 2))
+    (setq packlet-test-hook-count nil)))
+
+(ert-deftest packlet-test-startup-runs-immediately-after-startup ()
+  (let ((after-init-time (current-time))
+        (after-init-hook nil))
+    (setq packlet-test-hook-count 0)
+    (packlet packlet-test-startup-immediate-feature
+      :startup (packlet-test-hook-enable-counter 3))
+    (should (= packlet-test-hook-count 3))
+    (setq packlet-test-hook-count nil)))
+
+(ert-deftest packlet-test-startup-enable-runs-on-after-init-hook ()
+  (let ((after-init-time nil)
+        (after-init-hook nil))
+    (setq packlet-test-startup-enable-mode nil)
+    (packlet packlet-test-startup-enable-feature
+      :startup-enable packlet-test-startup-enable-mode)
+    (should-not packlet-test-startup-enable-mode)
+    (run-hooks 'after-init-hook)
+    (should packlet-test-startup-enable-mode)
+    (run-hooks 'after-init-hook)
+    (should packlet-test-startup-enable-mode)
+    (setq packlet-test-startup-enable-mode nil)))
+
+(ert-deftest packlet-test-startup-enable-cleanup-restores-mode-state ()
+  (let ((after-init-time (current-time))
+        (after-init-hook nil))
+    (with-temp-buffer
+      (setq packlet-test-startup-enable-mode nil)
+      (eval
+       '(packlet packlet-test-startup-enable-cleanup-feature
+          :startup-enable packlet-test-startup-enable-mode))
+      (should packlet-test-startup-enable-mode)
+      (packlet-cleanup-source (current-buffer))
+      (should-not packlet-test-startup-enable-mode))))
 
 (ert-deftest packlet-test-delayed-hook-reeval-does-not-duplicate ()
   (let* ((scheduled nil)

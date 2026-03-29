@@ -14,6 +14,8 @@ It focuses on the common parts of package configuration:
 - registering `magic-fallback-mode-alist` entries
 - defining derived major modes
 - wiring hooks, common hook-driven setup, global key bindings, and package keymaps
+- gating setup behind runtime conditions
+- running one-off startup callbacks and startup-time mode enables
 - defining prefix keymaps for package-local bindings
 - wiring lazy prefix-key keymaps
 - enabling mode-like functions after their feature loads
@@ -77,8 +79,9 @@ Clone this repository and add it to `load-path`:
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
   `:setq`, `:custom`, `:add-to-list`, `:list`, `:alist`, `:config`,
-  `:hook`, `:hook-setq`, `:hook-call`, `:hook-add`, `:hook-enable`, `:bind`,
-  `:bind-keymap`, `:prefix-map`, `:enable`, `:faces`, `:advice`,
+  `:hook`, `:hook-setq`, `:hook-call`, `:hook-add`, `:hook-enable`,
+  `:startup`, `:startup-enable`, `:bind`, `:bind-keymap`, `:prefix-map`,
+  `:enable`, `:faces`, `:advice`,
   `:mode`, `:remap`, `:derived-mode`, `:interpreter`, `:magic`,
   `:magic-fallback`, `:after-load`, `:idle`, and `:demand` registrations
   from that source instead of stacking duplicates.
@@ -105,6 +108,10 @@ Clone this repository and add it to `load-path`:
 - `:file`
   Override the library name used for autoloads, declarations, and demand
   loading. By default this is the same as the feature symbol.
+- `:when`
+  Evaluate the entire `packlet` form only when the condition is non-nil.
+- `:unless`
+  Evaluate the entire `packlet` form only when the condition is nil.
 - `:init`
   Forms evaluated immediately.
 - `:setq`
@@ -182,6 +189,15 @@ Clone this repository and add it to `load-path`:
   `(some-hook function)` or `(some-hook function arg)` entries that call a
   mode-like function from a hook. This is useful for patterns such as
   `(prog-mode-hook display-line-numbers-mode)`.
+- `:startup`
+  `function` or `(function arg...)` entries that run once from
+  `after-init-hook`. If startup already finished when the form is evaluated,
+  `packlet` runs the callback immediately.
+- `:startup-enable`
+  `function` or `(function arg)` entries that enable a mode-like function
+  once at startup. If startup already finished when the form is evaluated,
+  `packlet` applies the mode immediately and restores the previous state on
+  cleanup.
 - `:bind`
   Global key bindings such as `("C-c p" . some-command)` or keymap groups such
   as `(:map some-mode-map ("C-c p" . some-command))`.

@@ -48,6 +48,19 @@
   (should (= (packlet--idle-form '((:idle 2.5))) 2.5))
   (should-error (packlet--idle-form '((:idle 1 2)))))
 
+(ert-deftest packlet-test-when-and-unless-forms-validate-arity ()
+  (should (equal (packlet--keyword-form '((:when (display-graphic-p))) :when)
+                 '(display-graphic-p)))
+  (should (equal (packlet--keyword-form '((:unless noninteractive)) :unless)
+                 'noninteractive))
+  (should-error (packlet--keyword-form '((:when)) :when))
+  (should-error (packlet--keyword-form '((:unless a b)) :unless))
+  (should (equal (packlet--guard-form '((:when foo) (:unless bar)))
+                 '(and foo (not bar))))
+  (should (equal (packlet--guard-form '((:unless bar)))
+                 '(not bar)))
+  (should-not (packlet--guard-form nil)))
+
 (ert-deftest packlet-test-idle-delay-validates-values ()
   (should-not (packlet--idle-delay nil))
   (should (= (packlet--idle-delay t) 1.0))
@@ -186,6 +199,36 @@
        :delay nil
        :depth 0
        :local nil)))))
+
+(ert-deftest packlet-test-normalize-startups ()
+  (should
+   (equal
+    (packlet--normalize-startups
+     '(packlet-test-hook-enable-counter
+       (packlet-test-hook-enable-counter 2)
+       ((packlet-test-hook-enable-counter 3))))
+    '((:kind :startup
+       :function packlet-test-hook-enable-counter
+       :args nil)
+      (:kind :startup
+       :function packlet-test-hook-enable-counter
+       :args (2))
+      (:kind :startup
+       :function packlet-test-hook-enable-counter
+       :args (3))))))
+
+(ert-deftest packlet-test-normalize-startup-enables ()
+  (should
+   (equal
+    (packlet--normalize-startup-enables
+     '(packlet-test-hook-enable-mode
+       (packlet-test-hook-enable-mode 0)))
+    '((:function packlet-test-hook-enable-mode
+       :arg 1
+       :kind :startup-enable)
+      (:function packlet-test-hook-enable-mode
+       :arg 0
+       :kind :startup-enable)))))
 
 (ert-deftest packlet-test-normalize-autoloads-accepts-mixed-forms ()
   (should

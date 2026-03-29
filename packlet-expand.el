@@ -81,6 +81,9 @@
          (source-file (packlet--site-file site))
          (source-scope (and source-file
                             (list :file source-file)))
+         (has-guard (or (packlet--has-section-p sections :when)
+                        (packlet--has-section-p sections :unless)))
+         (guard-form (packlet--guard-form sections))
          (init-forms (packlet--section sections :init))
          (setq-forms (packlet--normalize-customs
                       (packlet--section sections :setq)))
@@ -134,6 +137,10 @@
                   (packlet--section sections :hook-add))
                  (packlet--normalize-hook-enables
                   (packlet--section sections :hook-enable))))
+         (startups (packlet--normalize-startups
+                    (packlet--section sections :startup)))
+         (startup-enables (packlet--normalize-startup-enables
+                           (packlet--section sections :startup-enable)))
          (bindings (packlet--normalize-bindings
                     (packlet--section sections :bind)))
          (keymap-bindings (packlet--normalize-bindings
@@ -172,16 +179,17 @@
                            site
                            "config"))
          (user-forms (packlet--expand-user-keywords sections feature file afters)))
-    `(progn
-       ,@(mapcar
+    (let ((expansion
+           `(progn
+              ,@(mapcar
           (lambda (variable)
             `(defvar ,variable))
           defines)
-       ,@(mapcar
+              ,@(mapcar
           (lambda (function)
             `(declare-function ,function ,file))
           functions)
-       (packlet--register-source-entry
+              (packlet--register-source-entry
         ',source-scope
         ',(list :site-feature site feature)
         (lambda ()
@@ -197,14 +205,14 @@
                    packlet--site-features))
         (lambda ()
           (remhash ',site packlet--site-features)))
-       ,@(packlet--expand-settings :setq feature site source-scope setq-forms)
-       ,@(packlet--expand-settings :custom feature site source-scope custom-forms)
-       ,@(mapcar
+              ,@(packlet--expand-settings :setq feature site source-scope setq-forms)
+              ,@(packlet--expand-settings :custom feature site source-scope custom-forms)
+              ,@(mapcar
           (lambda (lib)
             `(packlet--load-library ,lib))
           load-libs)
-       ,@init-forms
-       ,@(cl-loop
+              ,@init-forms
+              ,@(cl-loop
           for entry in derived-modes
           for index from 0
           append
@@ -767,6 +775,128 @@
                          `((packlet--unbind-variable ',hook-buffer-var)))
                      (packlet--unbind-function ',hook-function))))))))
        ,@(cl-loop
+          for entry in startups
+          for index from 0
+          append
+          (let* ((function (plist-get entry :function))
+                 (args (plist-get entry :args))
+                 (ran-var
+                  (packlet--generated-symbol
+                   "packlet--startup-ran"
+                   feature
+                   site
+                   (format "startup-%d" index)))
+                 (startup-function
+                  (packlet--generated-symbol
+                   "packlet--startup"
+                   feature
+                   site
+                   (format "startup-%d" index))))
+            `((defvar ,ran-var nil)
+              (packlet--register-source-entry
+               ',source-scope
+               ',(list site :startup index)
+               (lambda ()
+                 (setq ,ran-var nil)
+                 (packlet--maybe-autoload ',function ,file nil)
+                 (defalias ',startup-function
+                   (lambda ()
+                     (unless ,ran-var
+                       (setq ,ran-var t)
+                       (remove-hook 'after-init-hook ',startup-function)
+                       (funcall ',function ,@args))))
+                 (if after-init-time
+                     (funcall (symbol-function ',startup-function))
+                   (add-hook 'after-init-hook ',startup-function)))
+               (lambda ()
+                 (remove-hook 'after-init-hook ',startup-function)
+                 (packlet--unbind-variable ',ran-var)
+                 (packlet--unbind-function ',startup-function))))))
+       ,@(cl-loop
+          for entry in startup-enables
+          for index from 0
+          append
+          (let* ((function (plist-get entry :function))
+                 (arg-form (plist-get entry :arg))
+                 (applied-var
+                  (packlet--generated-symbol
+                   "packlet--startup-enable-applied"
+                   feature
+                   site
+                   (format "startup-enable-%d" index)))
+                 (had-value-var
+                  (packlet--generated-symbol
+                   "packlet--startup-enable-bound"
+                   feature
+                   site
+                   (format "startup-enable-%d" index)))
+                 (previous-value-var
+                  (packlet--generated-symbol
+                   "packlet--startup-enable-previous"
+                   feature
+                   site
+                   (format "startup-enable-%d" index)))
+                 (enabled-value-var
+                  (packlet--generated-symbol
+                   "packlet--startup-enable-current"
+                   feature
+                   site
+                   (format "startup-enable-%d" index)))
+                 (startup-function
+                  (packlet--generated-symbol
+                   "packlet--startup-enable"
+                   feature
+                   site
+                   (format "startup-enable-%d" index))))
+            `((defvar ,applied-var nil)
+              (defvar ,had-value-var nil)
+              (defvar ,previous-value-var nil)
+              (defvar ,enabled-value-var nil)
+              (packlet--register-source-entry
+               ',source-scope
+               ',(list site :startup-enable index)
+               (lambda ()
+                 (setq ,applied-var nil)
+                 (packlet--unbind-variable ',had-value-var)
+                 (packlet--unbind-variable ',previous-value-var)
+                 (packlet--unbind-variable ',enabled-value-var)
+                 (packlet--maybe-autoload ',function ,file nil)
+                 (defalias ',startup-function
+                   (lambda ()
+                     (unless ,applied-var
+                       (setq ,applied-var t
+                             ,had-value-var (boundp ',function))
+                       (if ,had-value-var
+                           (setq ,previous-value-var ,function)
+                         (packlet--unbind-variable ',previous-value-var))
+                       (funcall ',function ,arg-form)
+                       (unless (boundp ',function)
+                         (error "packlet: %S did not leave a mode variable bound"
+                                ',function))
+                       (setq ,enabled-value-var ,function)
+                       (remove-hook 'after-init-hook ',startup-function))))
+                 (if after-init-time
+                     (funcall (symbol-function ',startup-function))
+                   (add-hook 'after-init-hook ',startup-function)))
+               (lambda ()
+                 (remove-hook 'after-init-hook ',startup-function)
+                 (when (and ,applied-var
+                            (boundp ',function)
+                            (equal ,function ,enabled-value-var))
+                   (funcall ',function
+                            (if (and ,had-value-var ,previous-value-var)
+                                ,previous-value-var
+                              0))
+                   (when (and (not ,had-value-var)
+                              (boundp ',function)
+                              (null ,function))
+                     (makunbound ',function)))
+                 (packlet--unbind-variable ',applied-var)
+                 (packlet--unbind-variable ',had-value-var)
+                 (packlet--unbind-variable ',previous-value-var)
+                 (packlet--unbind-variable ',enabled-value-var)
+                 (packlet--unbind-function ',startup-function))))))
+       ,@(cl-loop
           for binding in bindings
           for index from 0
           collect
@@ -993,6 +1123,10 @@
                 ',afters
                 ,file
                 ,source-file)))))))
+      (if has-guard
+          `(when ,guard-form
+             ,expansion)
+        expansion))))
 
 (provide 'packlet-expand)
 

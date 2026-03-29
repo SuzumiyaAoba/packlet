@@ -205,6 +205,38 @@
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
+(ert-deftest packlet-test-file-reeval-false-guard-removes-old-hook ()
+  (let ((source-file (make-temp-file "packlet-test-guard-" nil ".el")))
+    (defvar packlet-test-guard-hook nil)
+    (unwind-protect
+        (progn
+          (setq packlet-test-hook-count 0
+                packlet-test-guard-hook nil)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-guard-feature\n\
+  :when t\n\
+  :hook ((packlet-test-guard-hook\n\
+          . (lambda ()\n\
+              (setq packlet-test-hook-count (1+ packlet-test-hook-count))))))\n")
+            (goto-char (point-min))
+            (eval-buffer)
+            (erase-buffer)
+            (insert "(packlet packlet-test-guard-feature\n\
+  :when nil\n\
+  :hook ((packlet-test-guard-hook\n\
+          . (lambda ()\n\
+              (setq packlet-test-hook-count (+ packlet-test-hook-count 10))))))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (run-hooks 'packlet-test-guard-hook)
+          (should (= packlet-test-hook-count 0)))
+      (setq packlet-test-hook-count nil)
+      (packlet-test--cleanup-symbols '(packlet-test-guard-hook))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
 (ert-deftest packlet-test-nonfile-eval-replaces-old-hook ()
   (defvar packlet-test-nonfile-hook nil)
   (unwind-protect

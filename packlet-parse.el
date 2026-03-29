@@ -15,9 +15,9 @@
   (require 'macroexp)
 
   (defconst packlet--keywords
-    '(:file :init :setq :custom :load :add-to-list :list :alist :config
+    '(:file :when :unless :init :setq :custom :load :add-to-list :list :alist :config
             :commands :autoload :mode :remap :derived-mode
-            :hook :hook-setq :hook-call :hook-add :hook-enable
+            :hook :hook-setq :hook-call :hook-add :hook-enable :startup :startup-enable
             :bind :bind-keymap :prefix-map :enable :faces :advice
             :interpreter :magic :after :after-load :idle :magic-fallback :demand
             :functions :defines))
@@ -263,6 +263,12 @@ Each PLIST may contain:
          (symbolp (car-safe value))
          (symbolp (cadr value))
          (null (cdddr value))))
+
+  (defun packlet--startup-entry-p (value)
+    "Return non-nil when VALUE looks like a valid `:startup' entry."
+    (or (symbolp value)
+        (and (packlet--proper-list-p value)
+             (symbolp (car-safe value)))))
 
   (defun packlet--parse-keyword-options (options spec context)
     "Parse keyword OPTIONS according to SPEC, reporting errors for CONTEXT.
@@ -596,6 +602,43 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
      #'packlet--hook-enable-entry-p
      #'packlet--normalize-hook-enable-entry))
 
+  (defun packlet--normalize-startup-entry (value)
+    "Normalize a single `:startup' VALUE into a plist."
+    (cond
+     ((symbolp value)
+      (list :kind :startup
+            :function value
+            :args nil))
+     ((and (packlet--proper-list-p value)
+           (symbolp (car-safe value)))
+      (list :kind :startup
+            :function (car value)
+            :args (cdr value)))
+     (t
+      (error "packlet: invalid entry %S for :startup" value))))
+
+  (defun packlet--normalize-startups (forms)
+    "Normalize FORMS under `:startup' into a flat list of entries."
+    (packlet--normalize-entries
+     forms :startup
+     #'packlet--startup-entry-p
+     #'packlet--normalize-startup-entry))
+
+  (defun packlet--normalize-startup-enable-entry (value)
+    "Normalize a single `:startup-enable' VALUE into a plist."
+    (let ((entry (packlet--normalize-enable-entry value)))
+      (plist-put entry :kind :startup-enable)))
+
+  (defun packlet--normalize-startup-enables (forms)
+    "Normalize FORMS under `:startup-enable' into a flat list of entries."
+    (packlet--normalize-entries
+     forms :startup-enable
+     (lambda (form)
+       (or (symbolp form)
+           (and (packlet--proper-list-p form)
+                (symbolp (car-safe form)))))
+     #'packlet--normalize-startup-enable-entry))
+
   (defun packlet--autoload-entry-p (value)
     "Return non-nil when VALUE is a valid `:autoload' tuple entry.
 A tuple entry is (FUNCTION FILE) or (FUNCTION FILE INTERACTIVE)."
@@ -892,6 +935,14 @@ an explicit `:compare' option."
           (error "packlet: invalid value %S for :custom" form))))
       (nreverse result)))
 
+  (defun packlet--keyword-form (sections keyword)
+    "Return KEYWORD's single form from SECTIONS, or nil when absent."
+    (when-let ((entry (assq keyword sections)))
+      (pcase (cdr entry)
+        ('() (error "packlet: %S requires exactly one form" keyword))
+        (`(,form) form)
+        (_ (error "packlet: %S accepts exactly one form" keyword)))))
+
   (defun packlet--demand-form (sections)
     "Return the `:demand' form from SECTIONS."
     (when-let ((entry (assq :demand sections)))
@@ -918,6 +969,17 @@ an explicit `:compare' option."
       value)
      (t
       (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
+
+  (defun packlet--guard-form (sections)
+    "Return the combined guard form for `:when' and `:unless' in SECTIONS."
+    (let ((when-form (packlet--keyword-form sections :when))
+          (unless-form (packlet--keyword-form sections :unless)))
+      (cond
+       ((and when-form unless-form)
+        `(and ,when-form (not ,unless-form)))
+       (when-form when-form)
+       (unless-form `(not ,unless-form))
+       (t nil))))
 
   (defun packlet--normalize-loads (forms)
     "Normalize FORMS under `:load' into a flat list of library name strings."
