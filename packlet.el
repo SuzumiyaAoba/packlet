@@ -1126,12 +1126,83 @@ the first matching entry.  When COMPARE-FN is non-nil, use it for matching."
   "Return non-nil when LEFT and RIGHT share the same alist key."
   (equal (car-safe left) (car-safe right)))
 
+(defun packlet--face-snapshot (face)
+  "Return a copy of FACE attributes."
+  (copy-tree (face-all-attributes face nil)))
+
+(defun packlet--restore-face-snapshot (face previous applied)
+  "Restore PREVIOUS FACE attributes where current values still match APPLIED."
+  (let (args)
+    (dolist (entry previous)
+      (let* ((attribute (car entry))
+             (previous-value (cdr entry))
+             (applied-value (alist-get attribute applied nil nil #'eq))
+             (current-value (face-attribute face attribute nil 'default)))
+        (when (equal current-value applied-value)
+          (setq args (append args (list attribute previous-value))))))
+    (when args
+      (apply #'set-face-attribute face nil args))))
+
+(defun packlet--capture-function-states (symbols)
+  "Capture function binding state for SYMBOLS."
+  (mapcar
+   (lambda (symbol)
+     (list symbol
+           (fboundp symbol)
+           (and (fboundp symbol)
+                (symbol-function symbol))))
+   symbols))
+
+(defun packlet--restore-function-states (previous installed)
+  "Restore PREVIOUS function states when current bindings still match INSTALLED."
+  (dolist (entry previous)
+    (pcase-let ((`(,symbol ,previous-bound ,previous-definition) entry))
+      (when-let ((installed-entry (assq symbol installed)))
+        (pcase-let ((`(,_ ,installed-bound ,installed-definition) installed-entry))
+          (when (and (eq (fboundp symbol) installed-bound)
+                     (or (not installed-bound)
+                         (eq (symbol-function symbol) installed-definition)))
+            (if previous-bound
+                (fset symbol previous-definition)
+              (packlet--unbind-function symbol))))))))
+
+(defun packlet--capture-variable-states (symbols)
+  "Capture variable binding state for SYMBOLS."
+  (mapcar
+   (lambda (symbol)
+     (list symbol
+           (boundp symbol)
+           (and (boundp symbol)
+                (symbol-value symbol))))
+   symbols))
+
+(defun packlet--restore-variable-states (previous installed)
+  "Restore PREVIOUS variable states when current bindings still match INSTALLED."
+  (dolist (entry previous)
+    (pcase-let ((`(,symbol ,previous-bound ,previous-value) entry))
+      (when-let ((installed-entry (assq symbol installed)))
+        (pcase-let ((`(,_ ,installed-bound ,installed-value) installed-entry))
+          (when (and (eq (boundp symbol) installed-bound)
+                     (or (not installed-bound)
+                         (equal (symbol-value symbol) installed-value)))
+            (if previous-bound
+                (set symbol previous-value)
+              (packlet--unbind-variable symbol))))))))
+
+(defun packlet--derived-mode-variable-symbols (mode)
+  "Return auxiliary variable symbols generated for derived MODE."
+  (mapcar
+   (lambda (suffix)
+     (intern (format "%s%s" mode suffix)))
+   '("-hook" "-map" "-syntax-table" "-abbrev-table")))
+
 (eval-and-compile
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :add-to-list :list :alist :config
-            :commands :autoload :mode :hook :bind :bind-keymap :prefix-map
-            :enable :advice :interpreter :magic :after :after-load :idle
-            :magic-fallback :demand :functions :defines))
+            :commands :autoload :mode :remap :derived-mode :hook :bind
+            :bind-keymap :prefix-map :enable :faces :advice :interpreter
+            :magic :after :after-load :idle :magic-fallback :demand
+            :functions :defines))
 
   (defvar packlet--user-keywords nil
     "Alist of (KEYWORD . PLIST) for user-defined keywords.
@@ -1298,6 +1369,25 @@ Each PLIST may contain:
     (and (consp value)
          (stringp (car value))
          (symbolp (cdr value))))
+
+  (defun packlet--remap-entry-p (value)
+    "Return non-nil when VALUE is a valid `:remap' entry."
+    (and (consp value)
+         (symbolp (car value))
+         (symbolp (cdr value))))
+
+  (defun packlet--derived-mode-entry-p (value)
+    "Return non-nil when VALUE looks like a `:derived-mode' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (symbolp (cadr value))
+         (stringp (caddr value))))
+
+  (defun packlet--face-entry-p (value)
+    "Return non-nil when VALUE looks like a `:faces' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (cdr value)))
 
   (defun packlet--magic-entry-p (value)
     "Return non-nil when VALUE is a valid `:magic' entry."
@@ -1631,6 +1721,71 @@ an explicit `:compare' option."
                 (symbolp (car-safe f)))))
      #'packlet--normalize-enable-entry))
 
+  (defun packlet--normalize-face-entry (value)
+    "Normalize a single `:faces' VALUE into a plist."
+    (unless (packlet--proper-list-p value)
+      (error "packlet: invalid entry %S for :faces" value))
+    (let ((face (car value))
+          (rest (cdr value))
+          copy
+          attributes)
+      (unless (symbolp face)
+        (error "packlet: invalid entry %S for :faces" value))
+      (while rest
+        (let ((attribute (pop rest)))
+          (unless (keywordp attribute)
+            (error "packlet: invalid face attribute %S in %S"
+                   attribute value))
+          (unless rest
+            (error "packlet: missing value for face attribute %S in %S"
+                   attribute value))
+          (let ((attribute-value (pop rest)))
+            (if (eq attribute :copy)
+                (progn
+                  (unless (symbolp attribute-value)
+                    (error "packlet: invalid :copy source %S in %S"
+                           attribute-value value))
+                  (setq copy attribute-value))
+              (setq attributes
+                    (append attributes (list attribute attribute-value)))))))
+      (unless (or copy attributes)
+        (error "packlet: invalid entry %S for :faces" value))
+      (list :face face
+            :copy copy
+            :attributes attributes)))
+
+  (defun packlet--normalize-faces (forms)
+    "Normalize FORMS under `:faces' into a flat list of entries."
+    (packlet--normalize-entries
+     forms :faces
+     #'packlet--face-entry-p
+     #'packlet--normalize-face-entry))
+
+  (defun packlet--normalize-derived-mode-entry (value)
+    "Normalize a single `:derived-mode' VALUE into a plist."
+    (unless (packlet--derived-mode-entry-p value)
+      (error "packlet: invalid entry %S for :derived-mode" value))
+    (let ((mode (nth 0 value))
+          (parent (nth 1 value))
+          (name (nth 2 value))
+          (rest (nthcdr 3 value))
+          docstring)
+      (when (stringp (car-safe rest))
+        (setq docstring (car rest)
+              rest (cdr rest)))
+      (list :mode mode
+            :parent parent
+            :name name
+            :docstring docstring
+            :body rest)))
+
+  (defun packlet--normalize-derived-modes (forms)
+    "Normalize FORMS under `:derived-mode' into a flat list of entries."
+    (packlet--normalize-entries
+     forms :derived-mode
+     #'packlet--derived-mode-entry-p
+     #'packlet--normalize-derived-mode-entry))
+
   (defun packlet--normalize-advice-options (options)
     "Normalize `:advice' OPTIONS into a plist."
     (let ((parsed (packlet--parse-keyword-options
@@ -1900,10 +2055,16 @@ Example:
                     :commands))
          (autoloads (packlet--normalize-autoloads
                      (packlet--section sections :autoload)))
+         (derived-modes (packlet--normalize-derived-modes
+                         (packlet--section sections :derived-mode)))
          (modes (packlet--normalize-pairs
                  (packlet--section sections :mode)
                  :mode
                  #'packlet--mode-entry-p))
+         (remaps (packlet--normalize-pairs
+                  (packlet--section sections :remap)
+                  :remap
+                  #'packlet--remap-entry-p))
          (interpreters (packlet--normalize-pairs
                         (packlet--section sections :interpreter)
                         :interpreter
@@ -1927,6 +2088,8 @@ Example:
                        :prefix-map))
          (enables (packlet--normalize-enables
                    (packlet--section sections :enable)))
+         (faces (packlet--normalize-faces
+                 (packlet--section sections :faces)))
          (advices (packlet--normalize-advices
                    (packlet--section sections :advice)))
          (afters (packlet--normalize-symbols
@@ -1986,6 +2149,85 @@ Example:
             `(packlet--load-library ,lib))
           load-libs)
        ,@init-forms
+       ,@(cl-loop
+          for entry in derived-modes
+          for index from 0
+          append
+          (let* ((mode (plist-get entry :mode))
+                 (parent (plist-get entry :parent))
+                 (name (plist-get entry :name))
+                 (docstring (plist-get entry :docstring))
+                 (body (plist-get entry :body))
+                 (variable-symbols (packlet--derived-mode-variable-symbols mode))
+                 (previous-function-states-var
+                  (packlet--generated-symbol
+                   "packlet--derived-mode-previous-functions"
+                   feature
+                   site
+                   (format "derived-mode-%d" index)))
+                 (installed-function-states-var
+                  (packlet--generated-symbol
+                   "packlet--derived-mode-installed-functions"
+                   feature
+                   site
+                   (format "derived-mode-%d" index)))
+                 (previous-variable-states-var
+                  (packlet--generated-symbol
+                   "packlet--derived-mode-previous-variables"
+                   feature
+                   site
+                   (format "derived-mode-%d" index)))
+                 (installed-variable-states-var
+                  (packlet--generated-symbol
+                   "packlet--derived-mode-installed-variables"
+                   feature
+                   site
+                   (format "derived-mode-%d" index))))
+            `((defvar ,previous-function-states-var nil)
+              (defvar ,installed-function-states-var nil)
+              (defvar ,previous-variable-states-var nil)
+              (defvar ,installed-variable-states-var nil)
+              (packlet--register-source-entry
+               ',source-scope
+               ',(list site :derived-mode index)
+               (lambda ()
+                 (setq ,previous-function-states-var
+                       (packlet--capture-function-states '(,mode))
+                       ,previous-variable-states-var
+                       (packlet--capture-variable-states ',variable-symbols))
+                 (packlet--maybe-autoload ',parent ,file t)
+                 (define-derived-mode ,mode ,parent ,name
+                   ,@(when docstring (list docstring))
+                   ,@body)
+                 (setq ,installed-function-states-var
+                       (packlet--capture-function-states '(,mode))
+                       ,installed-variable-states-var
+                       (packlet--capture-variable-states ',variable-symbols)))
+               (lambda ()
+                 (packlet--restore-variable-states
+                  ,previous-variable-states-var
+                  ,installed-variable-states-var)
+                 (packlet--restore-function-states
+                  ,previous-function-states-var
+                  ,installed-function-states-var)
+                 (packlet--unbind-variable ',previous-function-states-var)
+                 (packlet--unbind-variable ',installed-function-states-var)
+                 (packlet--unbind-variable ',previous-variable-states-var)
+                 (packlet--unbind-variable ',installed-variable-states-var))))))
+       ,@(cl-loop
+          for remap in remaps
+          for index from 0
+          collect
+          `(progn
+             (packlet--maybe-autoload ',(cdr remap) ,file t)
+             (packlet--register-source-entry
+              ',source-scope
+              ',(list site :remap index)
+              (lambda ()
+                (add-to-list 'major-mode-remap-alist ',remap))
+              (lambda ()
+                (setq major-mode-remap-alist
+                      (delete ',remap major-mode-remap-alist))))))
        ,@(cl-loop
           for entry in add-to-lists
           for index from 0
@@ -2147,6 +2389,89 @@ Example:
                ',(list site :enable index)
                ',feature
                ',enable-function
+               ',afters
+               ,source-file))))
+       ,@(cl-loop
+          for entry in faces
+          for index from 0
+          append
+          (let* ((face (plist-get entry :face))
+                 (copy-source (plist-get entry :copy))
+                 (attributes (plist-get entry :attributes))
+                 (attributes-form
+                  (cl-loop for (attribute value) on attributes by #'cddr
+                           append (list attribute value)))
+                 (previous-snapshot-var
+                  (packlet--generated-symbol
+                   "packlet--face-previous"
+                   feature
+                   site
+                   (format "faces-%d" index)))
+                 (applied-snapshot-var
+                  (packlet--generated-symbol
+                   "packlet--face-applied"
+                   feature
+                   site
+                   (format "faces-%d" index)))
+                 (attributes-var
+                  (packlet--generated-symbol
+                   "packlet--face-attributes"
+                   feature
+                   site
+                   (format "faces-%d" index)))
+                 (applied-var
+                  (packlet--generated-symbol
+                   "packlet--face-active"
+                   feature
+                   site
+                   (format "faces-%d" index))))
+            `((defvar ,previous-snapshot-var nil)
+              (defvar ,applied-snapshot-var nil)
+              (defvar ,attributes-var nil)
+              (defvar ,applied-var nil)
+              (packlet--register-source-entry
+               ',source-scope
+               ',(list site :faces-state index)
+               (lambda ()
+                 (setq ,applied-var nil)
+                 (packlet--unbind-variable ',previous-snapshot-var)
+                 (packlet--unbind-variable ',applied-snapshot-var)
+                 (packlet--unbind-variable ',attributes-var))
+               (lambda ()
+                 (when (and ,applied-var
+                            (facep ',face)
+                            ,previous-snapshot-var
+                            ,applied-snapshot-var)
+                   (packlet--restore-face-snapshot
+                    ',face
+                    ,previous-snapshot-var
+                    ,applied-snapshot-var))
+                 (packlet--unbind-variable ',previous-snapshot-var)
+                 (packlet--unbind-variable ',applied-snapshot-var)
+                 (packlet--unbind-variable ',attributes-var)
+                 (packlet--unbind-variable ',applied-var)))
+              (packlet--register-after-load
+               ',(list site :faces index)
+               ',feature
+               (lambda ()
+                 (when (and (not ,applied-var)
+                            (featurep ',feature)
+                            (packlet--all-features-loaded-p ',afters))
+                   (unless (facep ',face)
+                     (make-empty-face ',face))
+                   (setq ,applied-var t
+                         ,previous-snapshot-var
+                         (packlet--face-snapshot ',face)
+                         ,attributes-var
+                         (list ,@attributes-form))
+                   ,@(when copy-source
+                       `((unless (facep ',copy-source)
+                           (error "packlet: %S is not a face" ',copy-source))
+                         (copy-face ',copy-source ',face)))
+                   (when ,attributes-var
+                     (apply #'set-face-attribute ',face nil ,attributes-var))
+                   (setq ,applied-snapshot-var
+                         (packlet--face-snapshot ',face))))
                ',afters
                ,source-file))))
        ,@(cl-loop

@@ -8,13 +8,16 @@ It focuses on the common parts of package configuration:
 - autoloading helper functions
 - registering one-off list and alist entries
 - registering `auto-mode-alist` entries
+- registering `major-mode-remap-alist` entries
 - registering `interpreter-mode-alist` entries
 - registering `magic-mode-alist` entries
 - registering `magic-fallback-mode-alist` entries
+- defining derived major modes
 - wiring hooks, global key bindings, and package keymaps
 - defining prefix keymaps for package-local bindings
 - wiring lazy prefix-key keymaps
 - enabling mode-like functions after their feature loads
+- configuring faces after their feature loads
 - registering function advice
 - deferring configuration until a feature is actually loaded
 - warming up a feature after startup during idle time
@@ -74,10 +77,10 @@ Clone this repository and add it to `load-path`:
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
   `:setq`, `:custom`, `:add-to-list`, `:list`, `:alist`, `:config`,
-  `:hook`, `:bind`, `:bind-keymap`, `:prefix-map`, `:enable`, `:advice`,
-  `:mode`, `:interpreter`, `:magic`, `:magic-fallback`, `:after-load`,
-  `:idle`, and `:demand` registrations from that source instead of stacking
-  duplicates.
+  `:hook`, `:bind`, `:bind-keymap`, `:prefix-map`, `:enable`, `:faces`,
+  `:advice`, `:mode`, `:remap`, `:derived-mode`, `:interpreter`, `:magic`,
+  `:magic-fallback`, `:after-load`, `:idle`, and `:demand` registrations
+  from that source instead of stacking duplicates.
 - File-backed reevaluation is transactional. If the new evaluation fails part
   way through, `packlet` restores the previously working registrations.
 - Direct `eval` is also tracked. In Lisp buffers, nested forms containing
@@ -133,6 +136,11 @@ Clone this repository and add it to `load-path`:
   A tuple `(function "file" t)` autoloads from a specific file as interactive.
 - `:mode`
   `("\\\\.ext\\\\'" . some-mode)` pairs added to `auto-mode-alist`.
+- `:remap`
+  `(old-mode . new-mode)` pairs added to `major-mode-remap-alist`.
+- `:derived-mode`
+  `(child-mode parent-mode "Name" body...)` entries expanded with
+  `define-derived-mode`.
 - `:interpreter`
   `("python3" . python-mode)` pairs added to `interpreter-mode-alist`.
 - `:magic`
@@ -165,6 +173,12 @@ Clone this repository and add it to `load-path`:
   `:after` dependency are loaded.  A bare symbol calls the function with `1`.
   A tuple `(function arg)` calls it with `arg`, for example
   `(treemacs-git-mode 'deferred)`.
+- `:faces`
+  `(face :attribute value ...)` entries applied after the feature and every
+  `:after` dependency are loaded.  `:copy` copies another face before applying
+  explicit attributes, for example
+  `(anzu-mode-line :copy mode-line)` or
+  `(git-gutter:modified :background "purple")`.
 - `:advice`
   `(target how function)` entries added with `advice-add`.
   List-style entries additionally accept `:name` and `:depth`, for example

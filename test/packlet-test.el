@@ -50,6 +50,7 @@
 (declare-function packlet-test-al-custom-file "packlet-test-al-lib" ())
 (declare-function packlet-test-advised-target nil ())
 (declare-function packlet-test-enable-mode nil (&optional arg))
+(declare-function packlet-test-derived-mode nil ())
 
 (defun packlet-test--write-file (file contents)
   "Write CONTENTS to FILE."
@@ -100,6 +101,15 @@
       (fmakunbound symbol))
     (when (boundp symbol)
       (makunbound symbol))))
+
+(defun packlet-test--restore-face-snapshot (face snapshot)
+  "Restore FACE from SNAPSHOT captured by `packlet--face-snapshot'."
+  (unless (facep face)
+    (make-empty-face face))
+  (apply
+   #'set-face-attribute face nil
+   (cl-loop for (attribute . value) in snapshot
+            append (list attribute value))))
 
 (defun packlet-test--invoke-scheduled-timer (entry)
   "Invoke a fake timer ENTRY captured by test stubs."
@@ -1884,6 +1894,131 @@
           (should (eq packlet-test-enable-mode 'manual)))
       (packlet-test--cleanup-feature feature)
       (packlet-test--cleanup-symbols '(packlet-test-enable-mode))
+      (when (file-exists-p source-file)
+        (delete-file source-file))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-remap-keyword ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-remap-feature)
+         (source-file (make-temp-file "packlet-test-remap-" nil ".el")))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols '(packlet-test-remap-target-mode))
+          (packlet-test--write-feature
+           directory
+           feature
+           "(define-derived-mode packlet-test-remap-target-mode fundamental-mode \"Remap\")")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert (format "(packlet %S\n  :remap (packlet-test-remap-source-mode . packlet-test-remap-target-mode))\n"
+                            feature))
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (eq (alist-get 'packlet-test-remap-source-mode
+                                 major-mode-remap-alist)
+                      'packlet-test-remap-target-mode))
+          (should (autoloadp (symbol-function 'packlet-test-remap-target-mode)))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should-not (assq 'packlet-test-remap-source-mode
+                            major-mode-remap-alist)))
+      (setq major-mode-remap-alist
+            (assq-delete-all 'packlet-test-remap-source-mode
+                             major-mode-remap-alist))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols '(packlet-test-remap-target-mode))
+      (when (file-exists-p source-file)
+        (delete-file source-file))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-derived-mode-keyword ()
+  (let ((source-file (make-temp-file "packlet-test-derived-mode-" nil ".el"))
+        (symbols '(packlet-test-derived-mode
+                   packlet-test-derived-mode-hook
+                   packlet-test-derived-mode-map
+                   packlet-test-derived-mode-syntax-table
+                   packlet-test-derived-mode-abbrev-table)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-symbols symbols)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-derived-mode-feature\n\
+  :derived-mode (packlet-test-derived-mode text-mode \"Derived\"))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (fboundp 'packlet-test-derived-mode))
+          (with-temp-buffer
+            (packlet-test-derived-mode)
+            (should (eq major-mode 'packlet-test-derived-mode))
+            (should (derived-mode-p 'text-mode)))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should-not (fboundp 'packlet-test-derived-mode))
+          (should-not (boundp 'packlet-test-derived-mode-hook)))
+      (packlet-test--cleanup-symbols symbols)
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-faces-keyword ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-faces-feature)
+         (source-file (make-temp-file "packlet-test-faces-" nil ".el"))
+         (source-face 'packlet-test-faces-source-face)
+         (target-face 'packlet-test-faces-target-face)
+         source-snapshot
+         target-snapshot)
+    (unwind-protect
+        (progn
+          (make-empty-face source-face)
+          (make-empty-face target-face)
+          (setq source-snapshot (packlet--face-snapshot source-face))
+          (set-face-attribute source-face nil :foreground "red" :background "blue")
+          (set-face-attribute target-face nil :foreground "white" :background "black" :height 100)
+          (setq target-snapshot (packlet--face-snapshot target-face))
+          (packlet-test--write-feature directory feature "")
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert (format "(packlet %S\n  :faces ((%S :copy %S :height 140))\n  :demand t)\n"
+                            feature target-face source-face))
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (featurep feature))
+          (should (equal (face-attribute target-face :foreground nil 'default)
+                         (face-attribute source-face :foreground nil 'default)))
+          (should (equal (face-attribute target-face :background nil 'default)
+                         (face-attribute source-face :background nil 'default)))
+          (should (= (face-attribute target-face :height nil 'default) 140))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (equal (face-attribute target-face :foreground nil 'default)
+                         (alist-get :foreground target-snapshot nil nil #'eq)))
+          (should (equal (face-attribute target-face :background nil 'default)
+                         (alist-get :background target-snapshot nil nil #'eq)))
+          (should (equal (face-attribute target-face :height nil 'default)
+                         (alist-get :height target-snapshot nil nil #'eq))))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--restore-face-snapshot source-face source-snapshot)
+      (packlet-test--restore-face-snapshot target-face target-snapshot)
       (when (file-exists-p source-file)
         (delete-file source-file))
       (delete-directory directory t))))
