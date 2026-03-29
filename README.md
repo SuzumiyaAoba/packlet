@@ -6,12 +6,15 @@ It focuses on the common parts of package configuration:
 
 - autoloading interactive commands
 - autoloading helper functions
+- registering one-off list and alist entries
 - registering `auto-mode-alist` entries
 - registering `interpreter-mode-alist` entries
 - registering `magic-mode-alist` entries
 - registering `magic-fallback-mode-alist` entries
 - wiring hooks, global key bindings, and package keymaps
+- defining prefix keymaps for package-local bindings
 - wiring lazy prefix-key keymaps
+- registering function advice
 - deferring configuration until a feature is actually loaded
 - warming up a feature after startup during idle time
 - optionally demanding a feature once its dependencies are ready
@@ -69,9 +72,9 @@ Clone this repository and add it to `load-path`:
 `packlet` treats reevaluation as a first-class workflow.
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
-  `:setq`, `:custom`, `:config`, `:hook`, `:bind`, `:bind-keymap`, `:mode`,
-  `:interpreter`, `:magic`, `:magic-fallback`, `:after-load`, `:idle`, and
-  `:demand`
+  `:setq`, `:custom`, `:add-to-list`, `:config`, `:hook`, `:bind`,
+  `:bind-keymap`, `:prefix-map`, `:advice`, `:mode`, `:interpreter`,
+  `:magic`, `:magic-fallback`, `:after-load`, `:idle`, and `:demand`
   registrations from that source instead of stacking duplicates.
 - File-backed reevaluation is transactional. If the new evaluation fails part
   way through, `packlet` restores the previously working registrations.
@@ -105,6 +108,10 @@ Clone this repository and add it to `load-path`:
 - `:load`
   Load helper libraries immediately. If a library cannot be found, `packlet`
   emits a warning.
+- `:add-to-list`
+  `(variable element)` forms applied immediately with `add-to-list`.
+  List-style entries additionally accept `:append` and `:compare`, for
+  example `(completion-at-point-functions #'cape-file :append t)`.
 - `:config`
   Forms evaluated once after the feature and every `:after` dependency are
   loaded.
@@ -141,6 +148,14 @@ Clone this repository and add it to `load-path`:
   keymap groups such as `(:map some-mode-map ("C-c p" . some-prefix-map))`.
   The first key press loads the feature, swaps in the real keymap, and replays
   the original key sequence.
+- `:prefix-map`
+  Symbols naming sparse keymaps that should be created when still unbound.
+  This is useful together with `:bind-keymap` and `:bind (:map ...)` when a
+  package uses a config-owned prefix map.
+- `:advice`
+  `(target how function)` entries added with `advice-add`.
+  List-style entries additionally accept `:name` and `:depth`, for example
+  `(projectile-find-file :override consult-projectile-find-file :depth -10)`.
 - `:after`
   Feature symbols that must be loaded before `:config` or `:demand` becomes
   active.

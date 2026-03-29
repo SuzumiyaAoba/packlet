@@ -30,6 +30,12 @@
 (defvar packlet-test-explain-config-ran)
 (defvar packlet-test-reeval-result)
 (defvar packlet-test-hook-count)
+(defvar packlet-test-list-a nil)
+(defvar packlet-test-list-b nil)
+(defvar packlet-test-compare-list nil)
+(defvar packlet-test-managed-list nil)
+(defvar packlet-test-prefix-keyword-map nil)
+(defvar packlet-test-prefix-map-remove-map nil)
 (defvar packlet-test-tracked-setq 0)
 (defcustom packlet-test-tracked-custom 0
   "User option used by `packlet' setting tests."
@@ -40,6 +46,7 @@
 (declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
 (declare-function packlet-test-major-mode-hook "packlet-test-multi-hook-feature" ())
 (declare-function packlet-test-al-custom-file "packlet-test-al-lib" ())
+(declare-function packlet-test-advised-target nil ())
 
 (defun packlet-test--write-file (file contents)
   "Write CONTENTS to FILE."
@@ -1746,6 +1753,147 @@
           (eval-buffer)))
       (setq packlet-test-tracked-setq 0
             packlet-test-tracked-custom 0)
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-add-to-list-keyword ()
+  (let ((packlet-test-list-a '(2))
+        (packlet-test-list-b '(1))
+        (packlet-test-compare-list '(("Alpha" . 1))))
+    (packlet packlet-test-add-to-list-feature
+      :add-to-list ((packlet-test-list-a 1)
+                    (packlet-test-list-b 2 :append t)
+                    (packlet-test-compare-list
+                     '("alpha" . 2)
+                     :compare (lambda (left right)
+                                (string-equal (downcase (car left))
+                                              (downcase (car right)))))))
+    (should (equal packlet-test-list-a '(1 2)))
+    (should (equal packlet-test-list-b '(1 2)))
+    (should (equal packlet-test-compare-list '(("Alpha" . 1))))))
+
+(ert-deftest packlet-test-add-to-list-reeval-removal-preserves-later-change ()
+  (let ((source-file (make-temp-file "packlet-test-add-to-list-remove-" nil ".el"))
+        (packlet-test-managed-list '(2)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-add-to-list-remove-feature\n\
+  :add-to-list (packlet-test-managed-list 1))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (equal packlet-test-managed-list '(1 2)))
+          (setq packlet-test-managed-list '(99 1 2))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (equal packlet-test-managed-list '(99 2))))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-prefix-map-keyword-creates-and-loads-prefix-map ()
+  (let* ((directory (make-temp-file "packlet-test-" t))
+         (load-path (cons directory load-path))
+         (feature 'packlet-test-prefix-keyword-feature)
+         (symbols '(packlet-test-prefix-keyword-map
+                    packlet-test-prefix-keyword-command
+                    packlet-test-prefix-keyword-ran))
+         (key (kbd "C-c C-p"))
+         (old-binding (lookup-key global-map key)))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-feature feature)
+          (packlet-test--cleanup-symbols symbols)
+          (packlet-test--write-feature
+           directory
+           feature
+           "(defvar packlet-test-prefix-keyword-ran nil)\n\
+(defun packlet-test-prefix-keyword-command ()\n\
+  (interactive)\n\
+  (setq packlet-test-prefix-keyword-ran t))")
+          (eval
+           `(packlet ,feature
+              :commands (packlet-test-prefix-keyword-command)
+              :prefix-map packlet-test-prefix-keyword-map
+              :bind-keymap ("C-c C-p" . packlet-test-prefix-keyword-map)
+              :bind (:map packlet-test-prefix-keyword-map
+                     ("a" . packlet-test-prefix-keyword-command))))
+          (should (boundp 'packlet-test-prefix-keyword-map))
+          (should (keymapp packlet-test-prefix-keyword-map))
+          (should-not (featurep feature))
+          (execute-kbd-macro (kbd "C-c C-p a"))
+          (should (featurep feature))
+          (should (bound-and-true-p packlet-test-prefix-keyword-ran)))
+      (packlet-test--cleanup-feature feature)
+      (packlet-test--cleanup-symbols symbols)
+      (if old-binding
+          (global-set-key key old-binding)
+        (global-unset-key key))
+      (delete-directory directory t))))
+
+(ert-deftest packlet-test-prefix-map-reeval-after-removal-unbinds-created-map ()
+  (let ((source-file (make-temp-file "packlet-test-prefix-map-remove-" nil ".el")))
+    (unwind-protect
+        (progn
+          (packlet-test--cleanup-symbols '(packlet-test-prefix-map-remove-map))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-prefix-map-remove-feature\n\
+  :prefix-map packlet-test-prefix-map-remove-map)\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (boundp 'packlet-test-prefix-map-remove-map))
+          (should (keymapp packlet-test-prefix-map-remove-map))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should-not (boundp 'packlet-test-prefix-map-remove-map)))
+      (packlet-test--cleanup-symbols '(packlet-test-prefix-map-remove-map))
+      (when (file-exists-p source-file)
+        (delete-file source-file)))))
+
+(ert-deftest packlet-test-advice-keyword ()
+  (let ((source-file (make-temp-file "packlet-test-advice-" nil ".el"))
+        (result nil))
+    (unwind-protect
+        (progn
+          (fset 'packlet-test-advised-target
+                (lambda ()
+                  (setq result (append result '(target)))
+                  'done))
+          (fset 'packlet-test-before-advice
+                (lambda (&rest _args)
+                  (setq result (append result '(before)))))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert "(packlet packlet-test-advice-feature\n\
+  :advice ((packlet-test-advised-target :before packlet-test-before-advice\n\
+            :depth -10)))\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (eq (funcall 'packlet-test-advised-target) 'done))
+          (should (equal result '(before target)))
+          (setq result nil)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq buffer-file-name source-file)
+            (insert ";; removed\n")
+            (goto-char (point-min))
+            (eval-buffer))
+          (should (eq (funcall 'packlet-test-advised-target) 'done))
+          (should (equal result '(target))))
+      (packlet-test--cleanup-symbols
+       '(packlet-test-advised-target packlet-test-before-advice))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
