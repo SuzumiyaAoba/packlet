@@ -255,7 +255,7 @@
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
-(ert-deftest packlet-test-describe-source-shows-hook-add-and-hook-enable ()
+(ert-deftest packlet-test-describe-source-shows-hook-call-add-and-hook-enable ()
   (let ((source-file (make-temp-file "packlet-test-describe-hook-extra-" nil ".el")))
     (defvar packlet-test-describe-hook-extra nil)
     (defvar packlet-test-describe-hook-target nil)
@@ -265,11 +265,13 @@
             (emacs-lisp-mode)
             (setq buffer-file-name source-file)
             (insert "(packlet packlet-test-describe-hook-extra-feature\n\
+  :hook-call ((packlet-test-describe-hook-extra packlet-test-hook-enable-counter 2))\n\
   :hook-add ((packlet-test-describe-hook-extra packlet-test-describe-hook-target ignore))\n\
   :hook-enable ((packlet-test-describe-hook-extra packlet-test-hook-enable-mode)))\n")
             (goto-char (point-min))
             (eval-buffer))
           (let ((description (packlet-describe-source source-file)))
+            (should (string-match-p ":hook-call" description))
             (should (string-match-p ":hook-add" description))
             (should (string-match-p ":hook-enable" description))))
       (ignore-errors

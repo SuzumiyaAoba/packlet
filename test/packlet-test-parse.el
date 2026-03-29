@@ -40,7 +40,10 @@
     (packlet--normalize-hook-setqs
      '((packlet-test-hook-a
         (packlet-test-hook-setq-value 42)
-        (packlet-test-hook-setq-other "ok"))))
+        (packlet-test-hook-setq-other "ok")
+        :delay 0.5
+        :append t
+        :local t)))
     '((:kind :hook-setq
        :hook packlet-test-hook-a
        :function
@@ -48,9 +51,28 @@
          (setq-local packlet-test-hook-setq-value 42)
          (setq-local packlet-test-hook-setq-other "ok")
          nil)
-       :delay nil
-       :depth 0
-       :local nil)))))
+       :delay 0.5
+       :depth 90
+       :local t)))))
+
+(ert-deftest packlet-test-normalize-hook-calls ()
+  (should
+   (equal
+    (packlet--normalize-hook-calls
+     '((packlet-test-hook-a
+        packlet-test-hook-enable-counter 2
+        :delay 0.5
+        :append t
+        :local t)))
+    '((:kind :hook-call
+       :hook packlet-test-hook-a
+       :function
+       (lambda ()
+         (funcall 'packlet-test-hook-enable-counter 2))
+       :autoload packlet-test-hook-enable-counter
+       :delay 0.5
+       :depth 90
+       :local t)))))
 
 (ert-deftest packlet-test-normalize-hook-adds ()
   (should
@@ -62,6 +84,7 @@
        :function
        (lambda ()
          (add-hook 'packlet-test-hook-b 'ignore nil t))
+       :autoload ignore
        :delay nil
        :depth 0
        :local nil)))))
@@ -77,6 +100,7 @@
        :function
        (lambda ()
          (funcall 'packlet-test-hook-enable-mode 1))
+       :autoload packlet-test-hook-enable-mode
        :delay nil
        :depth 0
        :local nil)
@@ -85,6 +109,7 @@
        :function
        (lambda ()
          (funcall 'packlet-test-hook-enable-mode 0))
+       :autoload packlet-test-hook-enable-mode
        :delay nil
        :depth 0
        :local nil)))))

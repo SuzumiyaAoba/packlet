@@ -17,7 +17,7 @@
   (defconst packlet--keywords
     '(:file :init :setq :custom :load :add-to-list :list :alist :config
             :commands :autoload :mode :remap :derived-mode
-            :hook :hook-setq :hook-add :hook-enable
+            :hook :hook-setq :hook-call :hook-add :hook-enable
             :bind :bind-keymap :prefix-map :enable :faces :advice
             :interpreter :magic :after :after-load :idle :magic-fallback :demand
             :functions :defines))
@@ -242,8 +242,13 @@ Each PLIST may contain:
     "Return non-nil when VALUE is a valid `:hook-setq' entry."
     (and (packlet--proper-list-p value)
          (symbolp (car-safe value))
-         (cdr value)
-         (cl-every #'packlet--hook-setq-setting-p (cdr value))))
+         (cdr value)))
+
+  (defun packlet--hook-call-entry-p (value)
+    "Return non-nil when VALUE looks like a valid `:hook-call' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (symbolp (cadr value))))
 
   (defun packlet--hook-add-entry-p (value)
     "Return non-nil when VALUE looks like a valid `:hook-add' entry."
@@ -284,6 +289,23 @@ Returns an alist of (KEYWORD . VALUE) for recognized keywords."
             (push (cons key value) result))))
       (nreverse result)))
 
+  (defun packlet--split-trailing-keyword-options (items spec context)
+    "Split ITEMS into positional forms and trailing keyword options.
+SPEC and CONTEXT are passed to `packlet--parse-keyword-options'.  Returns
+a cons cell of (POSITIONALS . OPTION-FORMS)."
+    (let ((count (length items)))
+      (catch 'found
+        (dotimes (split (1+ count))
+          (let ((option-forms (nthcdr split items)))
+            (condition-case nil
+                (progn
+                  (packlet--parse-keyword-options option-forms spec context)
+                  (throw 'found
+                         (cons (cl-subseq items 0 split)
+                               option-forms)))
+              (error nil))))
+        (cons items nil))))
+
   (defun packlet--normalize-hook-options (options)
     "Normalize `:hook' OPTIONS into a plist."
     (let* ((bool-p (lambda (v) (memq v '(nil t))))
@@ -296,6 +318,24 @@ Returns an alist of (KEYWORD . VALUE) for recognized keywords."
            (append (alist-get :append parsed))
            (depth  (alist-get :depth parsed)))
       (list :depth (or depth (if append 90 0))
+            :local (alist-get :local parsed))))
+
+  (defun packlet--normalize-hook-like-options (options context)
+    "Normalize hook-like OPTIONS into a plist for CONTEXT."
+    (let* ((bool-p (lambda (v) (memq v '(nil t))))
+           (non-negative-number-p
+            (lambda (v) (and (numberp v) (>= v 0))))
+           (parsed (packlet--parse-keyword-options
+                    options
+                    `((:append . ,bool-p)
+                      (:depth  . numberp)
+                      (:local  . ,bool-p)
+                      (:delay  . ,non-negative-number-p))
+                    context))
+           (append (alist-get :append parsed))
+           (depth (alist-get :depth parsed)))
+      (list :delay (alist-get :delay parsed)
+            :depth (or depth (if append 90 0))
             :local (alist-get :local parsed))))
 
   (defun packlet--normalize-hook-add-options (options)
@@ -432,17 +472,33 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
     "Normalize a single `:hook-setq' VALUE into a hook entry."
     (unless (packlet--hook-setq-entry-p value)
       (error "packlet: invalid entry %S for :hook-setq" value))
-    (list :kind :hook-setq
-          :hook (car value)
-          :function `(lambda ()
-                       ,@(mapcar
-                          (lambda (setting)
-                            `(setq-local ,(car setting) ,(cadr setting)))
-                          (cdr value))
-                       nil)
-          :delay nil
-          :depth 0
-          :local nil))
+    (let* ((hook (car value))
+           (split
+            (packlet--split-trailing-keyword-options
+             (cdr value)
+             '((:append . nil)
+               (:depth . numberp)
+               (:local . nil)
+               (:delay . numberp))
+             "hook-setq"))
+           (settings (car split))
+           (options
+            (packlet--normalize-hook-like-options
+             (cdr split)
+             "hook-setq")))
+      (unless (and settings
+                   (cl-every #'packlet--hook-setq-setting-p settings))
+        (error "packlet: invalid entry %S for :hook-setq" value))
+      (append
+       (list :kind :hook-setq
+             :hook hook
+             :function `(lambda ()
+                          ,@(mapcar
+                             (lambda (setting)
+                               `(setq-local ,(car setting) ,(cadr setting)))
+                             settings)
+                          nil))
+       options)))
 
   (defun packlet--normalize-hook-setqs (forms)
     "Normalize FORMS under `:hook-setq' into a flat list of hook entries."
@@ -450,6 +506,43 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
      forms :hook-setq
      #'packlet--hook-setq-entry-p
      #'packlet--normalize-hook-setq-entry))
+
+  (defun packlet--normalize-hook-call-entry (value)
+    "Normalize a single `:hook-call' VALUE into a hook entry."
+    (unless (packlet--hook-call-entry-p value)
+      (error "packlet: invalid entry %S for :hook-call" value))
+    (let* ((hook (car value))
+           (split
+            (packlet--split-trailing-keyword-options
+             (cdr value)
+             '((:append . nil)
+               (:depth . numberp)
+               (:local . nil)
+               (:delay . numberp))
+             "hook-call"))
+           (positionals (car split))
+           (function (car positionals))
+           (args (cdr positionals))
+           (options
+            (packlet--normalize-hook-like-options
+             (cdr split)
+             "hook-call")))
+      (unless (symbolp function)
+        (error "packlet: invalid entry %S for :hook-call" value))
+      (append
+       (list :kind :hook-call
+             :hook hook
+             :function `(lambda ()
+                          (funcall ',function ,@args))
+             :autoload function)
+       options)))
+
+  (defun packlet--normalize-hook-calls (forms)
+    "Normalize FORMS under `:hook-call' into a flat list of hook entries."
+    (packlet--normalize-entries
+     forms :hook-call
+     #'packlet--hook-call-entry-p
+     #'packlet--normalize-hook-call-entry))
 
   (defun packlet--normalize-hook-add-entry (value)
     "Normalize a single `:hook-add' VALUE into a hook entry."
@@ -466,6 +559,7 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
                                    ',function
                                    ,(plist-get options :append)
                                    ,(plist-get options :local)))
+            :autoload function
             :delay nil
             :depth 0
             :local nil)))
@@ -490,6 +584,7 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
             :hook hook
             :function `(lambda ()
                          (funcall ',function ,arg))
+            :autoload function
             :delay nil
             :depth 0
             :local nil)))
@@ -578,7 +673,7 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
               :compare (alist-get :compare parsed)))))
 
   (defun packlet--normalize-list-entry (value keyword &optional default-compare)
-    "Normalize a single KEYWORD VALUE into a plist.
+    "Normalize a single KEYWORD VALUE into one or more plists.
 When DEFAULT-COMPARE is non-nil, use it when VALUE does not provide
 an explicit `:compare' option."
     (unless (packlet--proper-list-p value)
@@ -589,26 +684,54 @@ an explicit `:compare' option."
         (error "packlet: invalid entry %S for %S" value keyword))
       (unless rest
         (error "packlet: invalid entry %S for %S" value keyword))
-      (let ((options
-             (packlet--normalize-list-options (cdr rest) keyword)))
+      (pcase-let* ((`(,elements . ,option-forms)
+                    (if (memq keyword '(:add-to-list :list))
+                        (packlet--split-trailing-keyword-options
+                         rest
+                         '((:append . nil)
+                           (:compare . nil))
+                         (substring (symbol-name keyword) 1))
+                      (cons (list (car rest)) (cdr rest))))
+                   (_
+                    (unless elements
+                      (error "packlet: invalid entry %S for %S" value keyword)))
+                   (options
+                    (packlet--normalize-list-options option-forms keyword)))
         (when (and default-compare
                    (null (plist-get options :compare)))
           (setq options
                 (plist-put options :compare default-compare)))
-        (append
-         (list :kind keyword
-               :variable variable
-               :element (car rest))
-         options))))
+        (mapcar
+         (lambda (element)
+           (append
+            (list :kind keyword
+                  :variable variable
+                  :element element)
+            options))
+         (if (plist-get options :append)
+             elements
+           (reverse elements))))))
 
   (defun packlet--normalize-lists (forms keyword &optional default-compare)
     "Normalize FORMS under KEYWORD into a flat list of entries."
-    (packlet--normalize-entries
-     forms keyword
-     (lambda (f) (and (packlet--proper-list-p f)
-                      (symbolp (car-safe f))))
-     (lambda (entry)
-       (packlet--normalize-list-entry entry keyword default-compare))))
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((and (packlet--proper-list-p form)
+               (symbolp (car-safe form)))
+          (setq result
+                (append result
+                        (packlet--normalize-list-entry
+                         form keyword default-compare))))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (setq result
+                  (append result
+                          (packlet--normalize-list-entry
+                           entry keyword default-compare)))))
+         (t
+          (error "packlet: invalid value %S for %S" form keyword))))
+      result))
 
   (defun packlet--normalize-add-to-lists (forms)
     "Normalize FORMS under `:add-to-list' into a flat list of entries."

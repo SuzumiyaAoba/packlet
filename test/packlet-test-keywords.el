@@ -231,12 +231,15 @@
         (delete-file source-file)))))
 
 (ert-deftest packlet-test-list-keyword ()
-  (let ((packlet-test-list-a '(2)))
+  (let ((packlet-test-list-a '(3))
+        (packlet-test-list-b '(1)))
     (with-temp-buffer
       (emacs-lisp-mode)
       (packlet packlet-test-list-feature
-        :list (packlet-test-list-a 1))
-      (should (equal packlet-test-list-a '(1 2))))))
+        :list ((packlet-test-list-a 1 2)
+               (packlet-test-list-b 2 3 :append t)))
+      (should (equal packlet-test-list-a '(1 2 3)))
+      (should (equal packlet-test-list-b '(1 2 3))))))
 
 (ert-deftest packlet-test-alist-keyword-compares-by-car ()
   (let ((packlet-test-alist '(("alpha" . 1))))

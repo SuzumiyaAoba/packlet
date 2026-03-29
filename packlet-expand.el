@@ -128,6 +128,8 @@
                   (packlet--section sections :hook))
                  (packlet--normalize-hook-setqs
                   (packlet--section sections :hook-setq))
+                 (packlet--normalize-hook-calls
+                  (packlet--section sections :hook-call))
                  (packlet--normalize-hook-adds
                   (packlet--section sections :hook-add))
                  (packlet--normalize-hook-enables
@@ -656,6 +658,9 @@
           (let* ((hook-var (plist-get hook :hook))
                  (kind (or (plist-get hook :kind) :hook))
                  (function (plist-get hook :function))
+                 (autoload-function
+                  (or (and (symbolp function) function)
+                      (plist-get hook :autoload)))
                  (delay (plist-get hook :delay))
                  (depth (plist-get hook :depth))
                  (local (plist-get hook :local))
@@ -678,12 +683,19 @@
                         "packlet--delayed-hook-timer"
                         feature
                         site
+                        (format "hook-%d" index)))
+                      (run-buffer-var
+                       (packlet--generated-symbol
+                        "packlet--delayed-hook-buffer"
+                        feature
+                        site
                         (format "hook-%d" index))))
                   `((defvar ,timer-var nil)
+                    (defvar ,run-buffer-var nil)
                     ,@(when local
                         `((defvar ,hook-buffer-var nil)))
-                    ,@(when (symbolp function)
-                        `((packlet--maybe-autoload ',function ,file nil)))
+                    ,@(when autoload-function
+                        `((packlet--maybe-autoload ',autoload-function ,file nil)))
                     (packlet--register-source-entry
                      ',source-scope
                      ',(list site kind index)
@@ -697,12 +709,16 @@
                          (lambda ()
                            (when (timerp ,timer-var)
                              (cancel-timer ,timer-var))
-                           (setq ,timer-var
+                           (setq ,run-buffer-var (current-buffer)
+                                 ,timer-var
                                  (run-with-idle-timer
                                   ,delay nil
                                   (lambda ()
                                     (setq ,timer-var nil)
-                                    (funcall ,(packlet--hook-function-form function)))))))
+                                    (if (buffer-live-p ,run-buffer-var)
+                                        (with-current-buffer ,run-buffer-var
+                                          (funcall ,(packlet--hook-function-form function)))
+                                      (funcall ,(packlet--hook-function-form function))))))))
                        ,(if local
                             `(when (buffer-live-p ,hook-buffer-var)
                                (with-current-buffer ,hook-buffer-var
@@ -718,14 +734,15 @@
                          (when (timerp ,timer-var)
                            (cancel-timer ,timer-var))
                          (makunbound ',timer-var))
+                       (packlet--unbind-variable ',run-buffer-var)
                        ,@(when local
                            `((packlet--unbind-variable ',hook-buffer-var)))
                        (packlet--unbind-function ',hook-function)))))
               `((progn
                   ,@(when local
                       `((defvar ,hook-buffer-var nil)))
-                  ,@(when (symbolp function)
-                      `((packlet--maybe-autoload ',function ,file nil)))
+                  ,@(when autoload-function
+                      `((packlet--maybe-autoload ',autoload-function ,file nil)))
                   (packlet--register-source-entry
                    ',source-scope
                    ',(list site kind index)

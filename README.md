@@ -77,7 +77,7 @@ Clone this repository and add it to `load-path`:
 
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
   `:setq`, `:custom`, `:add-to-list`, `:list`, `:alist`, `:config`,
-  `:hook`, `:hook-setq`, `:hook-add`, `:hook-enable`, `:bind`,
+  `:hook`, `:hook-setq`, `:hook-call`, `:hook-add`, `:hook-enable`, `:bind`,
   `:bind-keymap`, `:prefix-map`, `:enable`, `:faces`, `:advice`,
   `:mode`, `:remap`, `:derived-mode`, `:interpreter`, `:magic`,
   `:magic-fallback`, `:after-load`, `:idle`, and `:demand` registrations
@@ -118,6 +118,8 @@ Clone this repository and add it to `load-path`:
   Lower-level alias for `:list`.
 - `:list`
   `(variable element)` forms applied immediately with `add-to-list`.
+  `:list` and `:add-to-list` also accept multiple elements per entry, for
+  example `(exec-path-from-shell-variables "A" "B" "C")`.
   List-style entries additionally accept `:append` and `:compare`, for
   example `(completion-at-point-functions #'cape-file :append t)`.
 - `:alist`
@@ -161,6 +163,16 @@ Clone this repository and add it to `load-path`:
   `(some-hook (variable value) ...)` entries that add a hook function calling
   `setq-local` for each variable. This is useful for mode hooks such as
   `(python-mode-hook (python-indent-offset 4) (fill-column 88))`.
+  Trailing `:delay`, `:append`, `:depth`, and `:local` options follow the
+  same meaning as `:hook`, for example
+  `(org-mode-hook (truncate-lines nil) :delay 0.5)`.
+- `:hook-call`
+  `(some-hook function arg...)` entries that call `function` with `arg...`
+  when the hook runs. This is useful when a hook only needs a direct function
+  call, for example
+  `(window-setup-hook set-frame-parameter nil 'fullscreen 'fullboth)`.
+  Trailing `:delay`, `:append`, `:depth`, and `:local` options are also
+  supported.
 - `:hook-add`
   `(some-hook target-hook function)` entries that add `function` to
   `target-hook` when `some-hook` runs. `function` must be a symbol.

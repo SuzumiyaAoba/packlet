@@ -4,7 +4,7 @@
 
 ;;; Commentary:
 
-;; Tests for hook registration, delayed hooks, and hook-setq behavior.
+;; Tests for hook registration, delayed hooks, hook-setq, and hook-call behavior.
 
 ;;; Code:
 
@@ -280,6 +280,51 @@
           packlet-test-hook-setq-other nil)
     (packlet-test--cleanup-symbols '(packlet-test-hook-setq-hook))))
 
+(ert-deftest packlet-test-hook-setq-delay-preserves-hook-buffer ()
+  (let ((scheduled nil)
+        (timer-id 0))
+    (defvar packlet-test-hook-setq-delayed-hook nil)
+    (unwind-protect
+        (progn
+          (setq packlet-test-hook-setq-delayed-hook nil
+                packlet-test-hook-setq-value nil)
+          (cl-letf (((symbol-function 'run-with-idle-timer)
+                     (lambda (secs repeat fn &rest args)
+                       (let ((timer (list :timer (cl-incf timer-id))))
+                         (push (list :timer timer :secs secs :repeat repeat
+                                     :fn fn :args args)
+                               scheduled)
+                         timer)))
+                    ((symbol-function 'timerp)
+                     (lambda (object)
+                       (and (consp object)
+                            (eq (car object) :timer)))))
+            (let ((target (generate-new-buffer " *packlet-hook-setq-delay*"))
+                  (other (generate-new-buffer " *packlet-hook-setq-delay-other*")))
+              (unwind-protect
+                  (progn
+                    (eval
+                     '(packlet packlet-test-hook-setq-delayed-feature
+                        :hook-setq ((packlet-test-hook-setq-delayed-hook
+                                     (packlet-test-hook-setq-value 42)
+                                     :delay 0.5))))
+                    (with-current-buffer target
+                      (run-hooks 'packlet-test-hook-setq-delayed-hook)
+                      (should-not (local-variable-p 'packlet-test-hook-setq-value)))
+                    (with-current-buffer other
+                      (packlet-test--invoke-scheduled-timer (car scheduled)))
+                    (with-current-buffer target
+                      (should (local-variable-p 'packlet-test-hook-setq-value))
+                      (should (= packlet-test-hook-setq-value 42)))
+                    (with-current-buffer other
+                      (should-not (local-variable-p 'packlet-test-hook-setq-value))))
+                (when (buffer-live-p target)
+                  (kill-buffer target))
+                (when (buffer-live-p other)
+                  (kill-buffer other))))))
+      (setq packlet-test-hook-setq-value nil)
+      (packlet-test--cleanup-symbols '(packlet-test-hook-setq-delayed-hook)))))
+
 (ert-deftest packlet-test-hook-setq-reeval-does-not-duplicate ()
   (defvar packlet-test-hook-setq-reeval-hook nil)
   (unwind-protect
@@ -301,6 +346,21 @@
           (should (= packlet-test-hook-count 1))))
     (setq packlet-test-hook-count nil)
     (packlet-test--cleanup-symbols '(packlet-test-hook-setq-reeval-hook))))
+
+(ert-deftest packlet-test-hook-call-runs-function-with-args ()
+  (defvar packlet-test-hook-call-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-call-hook nil
+              packlet-test-hook-count 0)
+        (eval
+         '(packlet packlet-test-hook-call-feature
+            :hook-call ((packlet-test-hook-call-hook
+                         packlet-test-hook-enable-counter 2))))
+        (run-hooks 'packlet-test-hook-call-hook)
+        (should (= packlet-test-hook-count 2)))
+    (setq packlet-test-hook-count nil)
+    (packlet-test--cleanup-symbols '(packlet-test-hook-call-hook))))
 
 (ert-deftest packlet-test-hook-add-registers-local-hook ()
   (defvar packlet-test-hook-add-source-hook nil)
