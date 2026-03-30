@@ -339,7 +339,7 @@
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
-(ert-deftest packlet-test-describe-source-shows-hook-call-add-and-hook-enable ()
+(ert-deftest packlet-test-describe-source-shows-hook-call-add-enable-and-disable ()
   (let ((source-file (make-temp-file "packlet-test-describe-hook-extra-" nil ".el")))
     (defvar packlet-test-describe-hook-extra nil)
     (defvar packlet-test-describe-hook-target nil)
@@ -350,11 +350,13 @@
            "(packlet packlet-test-describe-hook-extra-feature\n\
   :hook-call ((packlet-test-describe-hook-extra packlet-test-hook-enable-counter 2))\n\
   :hook-add ((packlet-test-describe-hook-extra packlet-test-describe-hook-target ignore))\n\
-  :hook-enable ((packlet-test-describe-hook-extra packlet-test-hook-enable-mode)))\n")
+  :hook-enable ((packlet-test-describe-hook-extra packlet-test-hook-enable-mode))\n\
+  :hook-disable ((packlet-test-describe-hook-extra packlet-test-hook-enable-mode)))\n")
           (let ((description (packlet-describe-source source-file)))
             (should (string-match-p ":hook-call" description))
             (should (string-match-p ":hook-add" description))
-            (should (string-match-p ":hook-enable" description))))
+            (should (string-match-p ":hook-enable" description))
+            (should (string-match-p ":hook-disable" description))))
       (ignore-errors
         (packlet-test-eval-in-file source-file ";; removed\n"))
       (packlet-test--cleanup-symbols

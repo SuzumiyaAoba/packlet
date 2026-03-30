@@ -200,6 +200,31 @@
        :depth 0
        :local nil)))))
 
+(ert-deftest packlet-test-normalize-hook-disables ()
+  (should
+   (equal
+    (packlet--normalize-hook-disables
+     '((packlet-test-hook-a packlet-test-hook-enable-mode)
+       (packlet-test-hook-b packlet-test-hook-enable-mode 0)))
+    '((:kind :hook-disable
+       :hook packlet-test-hook-a
+       :function
+       (lambda ()
+         (funcall 'packlet-test-hook-enable-mode -1))
+       :autoload packlet-test-hook-enable-mode
+       :delay nil
+       :depth 0
+       :local nil)
+      (:kind :hook-disable
+       :hook packlet-test-hook-b
+       :function
+       (lambda ()
+         (funcall 'packlet-test-hook-enable-mode 0))
+       :autoload packlet-test-hook-enable-mode
+       :delay nil
+       :depth 0
+       :local nil)))))
+
 (ert-deftest packlet-test-normalize-hook-whens ()
   (should
    (equal

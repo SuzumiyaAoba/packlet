@@ -137,6 +137,8 @@
                   (packlet--section sections :hook-add))
                  (packlet--normalize-hook-enables
                   (packlet--section sections :hook-enable))
+                 (packlet--normalize-hook-disables
+                  (packlet--section sections :hook-disable))
                  (packlet--normalize-hook-whens
                   (packlet--section sections :hook-when))
                  (packlet--normalize-hook-if-features

@@ -385,6 +385,21 @@
     (setq packlet-test-hook-count nil)
     (packlet-test--cleanup-symbols '(packlet-test-hook-enable-reeval-hook))))
 
+(ert-deftest packlet-test-hook-disable-runs-mode-like-function ()
+  (defvar packlet-test-hook-disable-hook nil)
+  (unwind-protect
+      (progn
+        (setq packlet-test-hook-disable-hook nil)
+        (with-temp-buffer
+          (packlet-test-hook-enable-mode 1)
+          (eval
+           '(packlet packlet-test-hook-disable-feature
+              :hook-disable ((packlet-test-hook-disable-hook
+                              packlet-test-hook-enable-mode))))
+          (run-hooks 'packlet-test-hook-disable-hook)
+          (should-not packlet-test-hook-enable-mode)))
+    (packlet-test--cleanup-symbols '(packlet-test-hook-disable-hook))))
+
 (ert-deftest packlet-test-hook-when-runs-only-when-condition-matches ()
   (defvar packlet-test-hook-when-hook nil)
   (unwind-protect

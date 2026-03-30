@@ -17,7 +17,8 @@
   (defconst packlet--keywords
     '(:file :when :unless :init :setq :custom :load :add-to-list :list :alist :config
             :commands :autoload :mode :remap :derived-mode
-            :hook :hook-setq :hook-call :hook-add :hook-enable :hook-when :hook-if-feature
+            :hook :hook-setq :hook-call :hook-add :hook-enable :hook-disable
+            :hook-when :hook-if-feature
             :startup :startup-enable
             :bind :bind-keymap :bind-after-load :prefix-map :enable :faces :advice
             :interpreter :magic :after :after-load :idle :magic-fallback :demand
@@ -264,6 +265,8 @@ Each PLIST may contain:
          (symbolp (car-safe value))
          (symbolp (cadr value))
          (null (cdddr value))))
+
+  (defalias 'packlet--hook-disable-entry-p #'packlet--hook-enable-entry-p)
 
   (defun packlet--hook-when-entry-p (value)
     "Return non-nil when VALUE looks like a valid `:hook-when' entry."
@@ -605,16 +608,16 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
      #'packlet--hook-add-entry-p
      #'packlet--normalize-hook-add-entry))
 
-  (defun packlet--normalize-hook-enable-entry (value)
-    "Normalize a single `:hook-enable' VALUE into a hook entry."
+  (defun packlet--normalize-hook-mode-entry (value keyword default-arg)
+    "Normalize mode-like hook VALUE for KEYWORD using DEFAULT-ARG."
     (unless (packlet--hook-enable-entry-p value)
-      (error "packlet: invalid entry %S for :hook-enable" value))
+      (error "packlet: invalid entry %S for %S" value keyword))
     (let ((hook (nth 0 value))
           (function (nth 1 value))
           (arg (if (null (cddr value))
-                   1
+                   default-arg
                  (nth 2 value))))
-      (list :kind :hook-enable
+      (list :kind keyword
             :hook hook
             :function `(lambda ()
                          (funcall ',function ,arg))
@@ -623,12 +626,27 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
             :depth 0
             :local nil)))
 
+  (defun packlet--normalize-hook-enable-entry (value)
+    "Normalize a single `:hook-enable' VALUE into a hook entry."
+    (packlet--normalize-hook-mode-entry value :hook-enable 1))
+
   (defun packlet--normalize-hook-enables (forms)
     "Normalize FORMS under `:hook-enable' into a flat list of hook entries."
     (packlet--normalize-entries
      forms :hook-enable
      #'packlet--hook-enable-entry-p
      #'packlet--normalize-hook-enable-entry))
+
+  (defun packlet--normalize-hook-disable-entry (value)
+    "Normalize a single `:hook-disable' VALUE into a hook entry."
+    (packlet--normalize-hook-mode-entry value :hook-disable -1))
+
+  (defun packlet--normalize-hook-disables (forms)
+    "Normalize FORMS under `:hook-disable' into a flat list of hook entries."
+    (packlet--normalize-entries
+     forms :hook-disable
+     #'packlet--hook-disable-entry-p
+     #'packlet--normalize-hook-disable-entry))
 
   (defun packlet--normalize-hook-when-entry (value)
     "Normalize a single `:hook-when' VALUE into a hook entry."

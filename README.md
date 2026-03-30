@@ -80,6 +80,7 @@ Clone this repository and add it to `load-path`:
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
   `:setq`, `:custom`, `:add-to-list`, `:list`, `:alist`, `:config`,
   `:hook`, `:hook-setq`, `:hook-call`, `:hook-add`, `:hook-enable`,
+  `:hook-disable`,
   `:hook-when`, `:hook-if-feature`,
   `:startup`, `:startup-enable`, `:bind`, `:bind-keymap`, `:bind-after-load`, `:prefix-map`,
   `:enable`, `:faces`, `:advice`,
@@ -190,6 +191,11 @@ Clone this repository and add it to `load-path`:
   `(some-hook function)` or `(some-hook function arg)` entries that call a
   mode-like function from a hook. This is useful for patterns such as
   `(prog-mode-hook display-line-numbers-mode)`.
+- `:hook-disable`
+  `(some-hook function)` or `(some-hook function arg)` entries that call a
+  mode-like function with a disabling argument from a hook. The default
+  argument is `-1`, so this is useful for patterns such as
+  `(org-mode-hook display-line-numbers-mode)`.
 - `:hook-when`
   `(some-hook condition function)` entries that call `function` from the hook
   only when `condition` is non-nil at hook run time. The same trailing
