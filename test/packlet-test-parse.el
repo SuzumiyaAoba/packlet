@@ -200,6 +200,45 @@
        :depth 0
        :local nil)))))
 
+(ert-deftest packlet-test-normalize-hook-whens ()
+  (should
+   (equal
+    (packlet--normalize-hook-whens
+     '((packlet-test-hook-a
+        (featurep 'packlet-test-feature)
+        packlet-test-hook-enable-mode
+        :append t)))
+    '((:kind :hook-when
+       :hook packlet-test-hook-a
+       :function
+       (lambda ()
+         (when (featurep 'packlet-test-feature)
+           (funcall #'packlet-test-hook-enable-mode)))
+       :autoload packlet-test-hook-enable-mode
+       :delay nil
+       :depth 90
+       :local nil)))))
+
+(ert-deftest packlet-test-normalize-hook-if-features ()
+  (should
+   (equal
+    (packlet--normalize-hook-if-features
+     '((packlet-test-hook-a
+        packlet-test-feature
+        packlet-test-hook-enable-mode
+        0.5
+        :local t)))
+    '((:kind :hook-if-feature
+       :hook packlet-test-hook-a
+       :function
+       (lambda ()
+         (when (featurep 'packlet-test-feature)
+           (funcall #'packlet-test-hook-enable-mode)))
+       :autoload packlet-test-hook-enable-mode
+       :delay 0.5
+       :depth 0
+       :local t)))))
+
 (ert-deftest packlet-test-normalize-startups ()
   (should
    (equal
@@ -216,6 +255,25 @@
       (:kind :startup
        :function packlet-test-hook-enable-counter
        :args (3))))))
+
+(ert-deftest packlet-test-normalize-bind-after-loads ()
+  (should
+   (equal
+    (packlet--normalize-bind-after-loads
+     '((packlet-test-feature
+        (:map packlet-test-mode-map
+         ("C-c a" . packlet-test-hook-enable-mode))
+        ("C-c b" . ignore))))
+    '((:kind :bind-after-load
+       :feature packlet-test-feature
+       :keymap packlet-test-mode-map
+       :key "C-c a"
+       :command packlet-test-hook-enable-mode)
+      (:kind :bind-after-load
+       :feature packlet-test-feature
+       :keymap global-map
+       :key "C-c b"
+       :command ignore)))))
 
 (ert-deftest packlet-test-normalize-startup-enables ()
   (should

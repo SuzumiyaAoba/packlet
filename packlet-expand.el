@@ -136,7 +136,11 @@
                  (packlet--normalize-hook-adds
                   (packlet--section sections :hook-add))
                  (packlet--normalize-hook-enables
-                  (packlet--section sections :hook-enable))))
+                  (packlet--section sections :hook-enable))
+                 (packlet--normalize-hook-whens
+                  (packlet--section sections :hook-when))
+                 (packlet--normalize-hook-if-features
+                  (packlet--section sections :hook-if-feature))))
          (startups (packlet--normalize-startups
                     (packlet--section sections :startup)))
          (startup-enables (packlet--normalize-startup-enables
@@ -145,6 +149,8 @@
                     (packlet--section sections :bind)))
          (keymap-bindings (packlet--normalize-bindings
                            (packlet--section sections :bind-keymap)))
+         (bind-after-loads (packlet--normalize-bind-after-loads
+                            (packlet--section sections :bind-after-load)))
          (prefix-maps (packlet--normalize-symbols
                        (packlet--section sections :prefix-map)
                        :prefix-map))
@@ -781,8 +787,29 @@
                    ',keymap
                    ,(packlet--key-form key)
                    ',command
-                   ',afters
-                   ,source-file))))))
+                  ',afters
+                  ,source-file))))))
+       ,@(cl-loop
+          for binding in bind-after-loads
+          for index from 0
+          collect
+          (let ((binding-id (list site :bind-after-load index))
+                (watched-feature (plist-get binding :feature))
+                (keymap (plist-get binding :keymap))
+                (key (plist-get binding :key))
+                (command (plist-get binding :command)))
+            `(progn
+               (packlet--maybe-autoload ',command ,file t)
+               (packlet--register-keymap-binding
+                ',binding-id
+                ',watched-feature
+                ',keymap
+                ,(packlet--key-form key)
+                ',command
+                ',afters
+                ,source-file
+                nil
+                t))))
        ,@(cl-loop
           for binding in keymap-bindings
           for index from 0

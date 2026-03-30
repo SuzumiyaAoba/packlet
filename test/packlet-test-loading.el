@@ -159,20 +159,16 @@
            directory
            feature
            "(defvar packlet-test-shared-top-level-loaded t)")
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name
-                  (expand-file-name "packlet-test-shared-top-level-config.el"
-                                    directory))
-            (insert "(progn\n\
+          (packlet-test-eval-in-file
+           (expand-file-name "packlet-test-shared-top-level-config.el"
+                             directory)
+           "(progn\n\
   (packlet packlet-test-shared-top-level\n\
     :config\n\
     (push 'a packlet-test-reeval-result))\n\
   (packlet packlet-test-shared-top-level\n\
     :config\n\
     (push 'b packlet-test-reeval-result)))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (require feature)
           (should (equal (sort (copy-sequence packlet-test-reeval-result)
                                (lambda (left right)
@@ -268,117 +264,81 @@
 (ert-deftest packlet-test-idle-load-waits-for-startup ()
   (let ((after-init-time nil)
         (emacs-startup-hook nil)
-        (scheduled nil)
-        (load-count 0)
-        (timer-id 0))
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (let ((timer (list :timer (cl-incf timer-id))))
-                   (push (list :timer timer :secs secs :repeat repeat
-                               :fn fn :args args)
-                         scheduled)
-                   timer)))
-              ((symbol-function 'timerp)
-               (lambda (object)
-                 (and (consp object)
-                      (eq (car object) :timer))))
-              ((symbol-function 'packlet--idle-load-ready-p)
-               (lambda ()
-                 t))
-              ((symbol-function 'packlet--load-feature)
-               (lambda (_feature _file)
-                 (setq load-count (1+ load-count))
-                 t)))
-      (packlet--register-idle-load
-       'packlet-test-idle-loader
-       'packlet-test-idle
-       nil
-       "packlet-test-idle"
-       2.5)
-      (should-not scheduled)
-      (run-hooks 'emacs-startup-hook)
-      (should (= (length scheduled) 1))
-      (should (= (plist-get (car scheduled) :secs) 2.5))
-      (packlet-test--invoke-scheduled-timer (car scheduled))
-      (should (= load-count 1)))))
+        (load-count 0))
+    (packlet-test-with-idle-timers scheduled
+      (cl-letf (((symbol-function 'packlet--idle-load-ready-p)
+                 (lambda ()
+                   t))
+                ((symbol-function 'packlet--load-feature)
+                 (lambda (_feature _file)
+                   (setq load-count (1+ load-count))
+                   t)))
+        (packlet--register-idle-load
+         'packlet-test-idle-loader
+         'packlet-test-idle
+         nil
+         "packlet-test-idle"
+         2.5)
+        (should-not scheduled)
+        (run-hooks 'emacs-startup-hook)
+        (should (= (length scheduled) 1))
+        (should (= (plist-get (car scheduled) :secs) 2.5))
+        (packlet-test--invoke-scheduled-timer (car scheduled))
+        (should (= load-count 1))))))
 
 (ert-deftest packlet-test-idle-load-retries-while-busy ()
   (let ((after-init-time (current-time))
-        (scheduled nil)
         (load-count 0)
-        (timer-id 0)
         (ready-values '(nil t)))
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (let ((timer (list :timer (cl-incf timer-id))))
-                   (push (list :timer timer :secs secs :repeat repeat
-                               :fn fn :args args)
-                         scheduled)
-                   timer)))
-              ((symbol-function 'timerp)
-               (lambda (object)
-                 (and (consp object)
-                      (eq (car object) :timer))))
-              ((symbol-function 'packlet--idle-load-ready-p)
-               (lambda ()
-                 (prog1 (car ready-values)
-                   (setq ready-values
-                         (or (cdr ready-values) ready-values)))))
-              ((symbol-function 'packlet--load-feature)
-               (lambda (_feature _file)
-                 (setq load-count (1+ load-count))
-                 t)))
-      (packlet--register-idle-load
-       'packlet-test-idle-loader
-       'packlet-test-idle
-       nil
-       "packlet-test-idle"
-       1.0)
-      (should (= (length scheduled) 1))
-      (packlet-test--invoke-scheduled-timer (car scheduled))
-      (should (= load-count 0))
-      (should (= (length scheduled) 2))
-      (packlet-test--invoke-scheduled-timer (car scheduled))
-      (should (= load-count 1)))))
+    (packlet-test-with-idle-timers scheduled
+      (cl-letf (((symbol-function 'packlet--idle-load-ready-p)
+                 (lambda ()
+                   (prog1 (car ready-values)
+                     (setq ready-values
+                           (or (cdr ready-values) ready-values)))))
+                ((symbol-function 'packlet--load-feature)
+                 (lambda (_feature _file)
+                   (setq load-count (1+ load-count))
+                   t)))
+        (packlet--register-idle-load
+         'packlet-test-idle-loader
+         'packlet-test-idle
+         nil
+         "packlet-test-idle"
+         1.0)
+        (should (= (length scheduled) 1))
+        (packlet-test--invoke-scheduled-timer (car scheduled))
+        (should (= load-count 0))
+        (should (= (length scheduled) 2))
+        (packlet-test--invoke-scheduled-timer (car scheduled))
+        (should (= load-count 1))))))
 
 (ert-deftest packlet-test-idle-load-waits-for-after-feature ()
   (let* ((directory (make-temp-file "packlet-test-" t))
          (load-path (cons directory load-path))
-         (after-init-time (current-time))
-         (scheduled nil)
-         (timer-id 0))
+         (after-init-time (current-time)))
     (unwind-protect
-        (cl-letf (((symbol-function 'run-with-idle-timer)
-                   (lambda (secs repeat fn &rest args)
-                     (let ((timer (list :timer (cl-incf timer-id))))
-                       (push (list :timer timer :secs secs :repeat repeat
-                                   :fn fn :args args)
-                             scheduled)
-                       timer)))
-                  ((symbol-function 'timerp)
-                   (lambda (object)
-                     (and (consp object)
-                          (eq (car object) :timer))))
-                  ((symbol-function 'packlet--idle-load-ready-p)
-                   (lambda ()
-                     t))
-                  ((symbol-function 'packlet--load-feature)
-                   (lambda (_feature _file)
-                     t)))
-          (packlet-test--cleanup-feature 'packlet-test-idle-after)
-          (packlet-test--write-feature
-           directory
-           'packlet-test-idle-after
-           "(defvar packlet-test-idle-after-loaded t)")
-          (packlet--register-idle-load
-           'packlet-test-idle-loader
-           'packlet-test-idle
-           '(packlet-test-idle-after)
-           "packlet-test-idle"
-           1.0)
-          (should-not scheduled)
-          (require 'packlet-test-idle-after)
-          (should (= (length scheduled) 1)))
+        (packlet-test-with-idle-timers scheduled
+          (cl-letf (((symbol-function 'packlet--idle-load-ready-p)
+                     (lambda ()
+                       t))
+                    ((symbol-function 'packlet--load-feature)
+                     (lambda (_feature _file)
+                       t)))
+            (packlet-test--cleanup-feature 'packlet-test-idle-after)
+            (packlet-test--write-feature
+             directory
+             'packlet-test-idle-after
+             "(defvar packlet-test-idle-after-loaded t)")
+            (packlet--register-idle-load
+             'packlet-test-idle-loader
+             'packlet-test-idle
+             '(packlet-test-idle-after)
+             "packlet-test-idle"
+             1.0)
+            (should-not scheduled)
+            (require 'packlet-test-idle-after)
+            (should (= (length scheduled) 1))))
       (packlet-test--cleanup-feature 'packlet-test-idle-after)
       (delete-directory directory t))))
 

@@ -467,14 +467,17 @@ ID identifies the current `packlet' expansion."
 
 (defun packlet--register-keymap-binding (id feature keymap key command afters
                                             &optional source-file
-                                            restore-predicate)
+                                            restore-predicate
+                                            skip-initial-install)
   "Bind KEY to COMMAND in KEYMAP when the map becomes available.
 FEATURE and AFTERS are watched for opportunities to install the binding.
 ID identifies the current `packlet' expansion.
 
 When RESTORE-PREDICATE is non-nil, it is called with the current binding
 and the installed map during cleanup.  Returning non-nil allows cleanup to
-restore the previous binding even when KEY no longer points at COMMAND."
+restore the previous binding even when KEY no longer points at COMMAND.
+When SKIP-INITIAL-INSTALL is non-nil, do not attempt to install until a
+watched feature load event fires."
   (let (installed-map previous-binding)
     (packlet--register-source-entry
      (packlet--source-scope-file source-file)
@@ -492,7 +495,8 @@ restore the previous binding even when KEY no longer points at COMMAND."
          (dolist (after afters)
            (packlet--register-after-load-handler
             after (list id after) install source-file))
-         (funcall install)))
+         (unless skip-initial-install
+           (funcall install))))
      (lambda ()
        (when installed-map
          (let ((current (lookup-key installed-map key)))

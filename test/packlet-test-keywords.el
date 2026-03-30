@@ -160,22 +160,14 @@
         (progn
           (setq packlet-test-tracked-setq 10
                 packlet-test-tracked-custom 20)
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-settings-preserve-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-settings-preserve-feature\n\
   :setq (packlet-test-tracked-setq 1)\n\
   :custom (packlet-test-tracked-custom 2))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (setq packlet-test-tracked-setq 99
                 packlet-test-tracked-custom 98)
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert ";; removed\n")
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file source-file ";; removed\n")
           (should (= packlet-test-tracked-setq 99))
           (should (= packlet-test-tracked-custom 98)))
       (ignore-errors
@@ -211,21 +203,13 @@
         (packlet-test-managed-list '(2)))
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-add-to-list-remove-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-add-to-list-remove-feature\n\
   :add-to-list (packlet-test-managed-list 1))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (should (equal packlet-test-managed-list '(1 2)))
           (setq packlet-test-managed-list '(99 1 2))
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert ";; removed\n")
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file source-file ";; removed\n")
           (should (equal packlet-test-managed-list '(99 2))))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
@@ -292,21 +276,13 @@
 (defun packlet-test-enable-mode (&optional arg)\n\
   (setq packlet-test-enable-mode\n\
         (if (memq arg '(0 -1 nil)) nil arg)))")
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert (format "(packlet %S\n  :enable packlet-test-enable-mode\n  :demand t)\n"
-                            feature))
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file
+           source-file
+           (format "(packlet %S\n  :enable packlet-test-enable-mode\n  :demand t)\n"
+                   feature))
           (should (eq packlet-test-enable-mode 1))
           (packlet-test-enable-mode 'manual)
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert ";; removed\n")
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file source-file ";; removed\n")
           (should (eq packlet-test-enable-mode 'manual)))
       (packlet-test--cleanup-feature feature)
       (packlet-test--cleanup-symbols '(packlet-test-enable-mode))
@@ -327,23 +303,15 @@
            directory
            feature
            "(define-derived-mode packlet-test-remap-target-mode fundamental-mode \"Remap\")")
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert (format "(packlet %S\n  :remap (packlet-test-remap-source-mode . packlet-test-remap-target-mode))\n"
-                            feature))
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file
+           source-file
+           (format "(packlet %S\n  :remap (packlet-test-remap-source-mode . packlet-test-remap-target-mode))\n"
+                   feature))
           (should (eq (alist-get 'packlet-test-remap-source-mode
                                  major-mode-remap-alist)
                       'packlet-test-remap-target-mode))
           (should (autoloadp (symbol-function 'packlet-test-remap-target-mode)))
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert ";; removed\n")
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file source-file ";; removed\n")
           (should-not (assq 'packlet-test-remap-source-mode
                             major-mode-remap-alist)))
       (setq major-mode-remap-alist
@@ -365,24 +333,16 @@
     (unwind-protect
         (progn
           (packlet-test--cleanup-symbols symbols)
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-derived-mode-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-derived-mode-feature\n\
   :derived-mode (packlet-test-derived-mode text-mode \"Derived\"))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (should (fboundp 'packlet-test-derived-mode))
           (with-temp-buffer
             (packlet-test-derived-mode)
             (should (eq major-mode 'packlet-test-derived-mode))
             (should (derived-mode-p 'text-mode)))
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert ";; removed\n")
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file source-file ";; removed\n")
           (should-not (fboundp 'packlet-test-derived-mode))
           (should-not (boundp 'packlet-test-derived-mode-hook)))
       (packlet-test--cleanup-symbols symbols)
@@ -407,25 +367,17 @@
           (set-face-attribute target-face nil :foreground "white" :background "black" :height 100)
           (setq target-snapshot (packlet--face-snapshot target-face))
           (packlet-test--write-feature directory feature "")
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert (format "(packlet %S\n  :faces ((%S :copy %S :height 140))\n  :demand t)\n"
-                            feature target-face source-face))
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file
+           source-file
+           (format "(packlet %S\n  :faces ((%S :copy %S :height 140))\n  :demand t)\n"
+                   feature target-face source-face))
           (should (featurep feature))
           (should (equal (face-attribute target-face :foreground nil 'default)
                          (face-attribute source-face :foreground nil 'default)))
           (should (equal (face-attribute target-face :background nil 'default)
                          (face-attribute source-face :background nil 'default)))
           (should (= (face-attribute target-face :height nil 'default) 140))
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert ";; removed\n")
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file source-file ";; removed\n")
           (should (equal (face-attribute target-face :foreground nil 'default)
                          (alist-get :foreground target-snapshot nil nil #'eq)))
           (should (equal (face-attribute target-face :background nil 'default)
@@ -451,23 +403,15 @@
           (fset 'packlet-test-before-advice
                 (lambda (&rest _args)
                   (setq result (append result '(before)))))
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-advice-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-advice-feature\n\
   :advice ((packlet-test-advised-target :before packlet-test-before-advice\n\
             :depth -10)))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (should (eq (funcall 'packlet-test-advised-target) 'done))
           (should (equal result '(before target)))
           (setq result nil)
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert ";; removed\n")
-            (goto-char (point-min))
-            (eval-buffer))
+          (packlet-test-eval-in-file source-file ";; removed\n")
           (should (eq (funcall 'packlet-test-advised-target) 'done))
           (should (equal result '(target))))
       (packlet-test--cleanup-symbols

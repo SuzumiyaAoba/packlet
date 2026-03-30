@@ -80,7 +80,8 @@ Clone this repository and add it to `load-path`:
 - Re-evaluating a file with `eval-buffer` or `load-file` replaces old
   `:setq`, `:custom`, `:add-to-list`, `:list`, `:alist`, `:config`,
   `:hook`, `:hook-setq`, `:hook-call`, `:hook-add`, `:hook-enable`,
-  `:startup`, `:startup-enable`, `:bind`, `:bind-keymap`, `:prefix-map`,
+  `:hook-when`, `:hook-if-feature`,
+  `:startup`, `:startup-enable`, `:bind`, `:bind-keymap`, `:bind-after-load`, `:prefix-map`,
   `:enable`, `:faces`, `:advice`,
   `:mode`, `:remap`, `:derived-mode`, `:interpreter`, `:magic`,
   `:magic-fallback`, `:after-load`, `:idle`, and `:demand` registrations
@@ -189,6 +190,14 @@ Clone this repository and add it to `load-path`:
   `(some-hook function)` or `(some-hook function arg)` entries that call a
   mode-like function from a hook. This is useful for patterns such as
   `(prog-mode-hook display-line-numbers-mode)`.
+- `:hook-when`
+  `(some-hook condition function)` entries that call `function` from the hook
+  only when `condition` is non-nil at hook run time. The same trailing
+  `:delay`, `:append`, and `:local` options as `:hook` are supported.
+- `:hook-if-feature`
+  `(some-hook feature function)` entries that call `function` from the hook
+  only when `feature` is currently loaded. This is a shorthand for
+  `:hook-when` with `(featurep 'feature)`.
 - `:startup`
   `function` or `(function arg...)` entries that run once from
   `after-init-hook`. If startup already finished when the form is evaluated,
@@ -206,6 +215,10 @@ Clone this repository and add it to `load-path`:
   keymap groups such as `(:map some-mode-map ("C-c p" . some-prefix-map))`.
   The first key press loads the feature, swaps in the real keymap, and replays
   the original key sequence.
+- `:bind-after-load`
+  `(feature binding...)` entries that install ordinary `:bind` bindings only
+  after `feature` loads. This is useful for patching package-owned keymaps such
+  as `projectile-command-map` without writing `with-eval-after-load` manually.
 - `:prefix-map`
   Symbols naming sparse keymaps that should be created when still unbound.
   This is useful together with `:bind-keymap` and `:bind (:map ...)` when a

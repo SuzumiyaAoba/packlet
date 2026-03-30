@@ -305,25 +305,17 @@
     (defvar packlet-test-describe-hook nil)
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-describe-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-describe-feature\n\
   :setq (packlet-test-tracked-setq 7)\n\
   :hook ((packlet-test-describe-hook . ignore)))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (let ((description (packlet-describe-source source-file)))
             (should (string-match-p (regexp-quote source-file) description))
             (should (string-match-p ":setq" description))
             (should (string-match-p ":hook" description))))
       (ignore-errors
-        (with-temp-buffer
-          (emacs-lisp-mode)
-          (setq buffer-file-name source-file)
-          (insert ";; removed\n")
-          (goto-char (point-min))
-          (eval-buffer)))
+        (packlet-test-eval-in-file source-file ";; removed\n"))
       (packlet-test--cleanup-symbols '(packlet-test-describe-hook))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
@@ -333,24 +325,16 @@
     (defvar packlet-test-describe-hook-setq nil)
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-describe-hook-setq-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-describe-hook-setq-feature\n\
   :hook-setq ((packlet-test-describe-hook-setq\n\
                (packlet-test-hook-setq-value 42))))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (let ((description (packlet-describe-source source-file)))
             (should (string-match-p (regexp-quote source-file) description))
             (should (string-match-p ":hook-setq" description))))
       (ignore-errors
-        (with-temp-buffer
-          (emacs-lisp-mode)
-          (setq buffer-file-name source-file)
-          (insert ";; removed\n")
-          (goto-char (point-min))
-          (eval-buffer)))
+        (packlet-test-eval-in-file source-file ";; removed\n"))
       (packlet-test--cleanup-symbols '(packlet-test-describe-hook-setq))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
@@ -361,26 +345,18 @@
     (defvar packlet-test-describe-hook-target nil)
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-describe-hook-extra-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-describe-hook-extra-feature\n\
   :hook-call ((packlet-test-describe-hook-extra packlet-test-hook-enable-counter 2))\n\
   :hook-add ((packlet-test-describe-hook-extra packlet-test-describe-hook-target ignore))\n\
   :hook-enable ((packlet-test-describe-hook-extra packlet-test-hook-enable-mode)))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (let ((description (packlet-describe-source source-file)))
             (should (string-match-p ":hook-call" description))
             (should (string-match-p ":hook-add" description))
             (should (string-match-p ":hook-enable" description))))
       (ignore-errors
-        (with-temp-buffer
-          (emacs-lisp-mode)
-          (setq buffer-file-name source-file)
-          (insert ";; removed\n")
-          (goto-char (point-min))
-          (eval-buffer)))
+        (packlet-test-eval-in-file source-file ";; removed\n"))
       (packlet-test--cleanup-symbols
        '(packlet-test-describe-hook-extra packlet-test-describe-hook-target))
       (when (file-exists-p source-file)
@@ -391,14 +367,11 @@
     (defvar packlet-test-describe-feature-hook nil)
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-describe-feature-target\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-describe-feature-target\n\
   :setq (packlet-test-tracked-setq 7)\n\
   :hook ((packlet-test-describe-feature-hook . ignore)))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (let ((description
                  (packlet-describe-feature 'packlet-test-describe-feature-target)))
             (should (string-match-p "Feature: packlet-test-describe-feature-target"
@@ -407,12 +380,7 @@
             (should (string-match-p ":setq" description))
             (should (string-match-p ":hook" description))))
       (ignore-errors
-        (with-temp-buffer
-          (emacs-lisp-mode)
-          (setq buffer-file-name source-file)
-          (insert ";; removed\n")
-          (goto-char (point-min))
-          (eval-buffer)))
+        (packlet-test-eval-in-file source-file ";; removed\n"))
       (packlet-test--cleanup-symbols '(packlet-test-describe-feature-hook))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
@@ -429,28 +397,20 @@
         (after-load-alist nil))
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-list-feature-a\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-list-feature-a\n\
   :setq (packlet-test-tracked-setq 1))\n\
 \n\
 (packlet packlet-test-list-feature-b\n\
   :config nil)\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (let ((description (packlet-list-features)))
             (should (string-match-p "Features: 2" description))
             (should (string-match-p "packlet-test-list-feature-a" description))
             (should (string-match-p "packlet-test-list-feature-b" description))
             (should (string-match-p "sources=1" description))))
       (ignore-errors
-        (with-temp-buffer
-          (emacs-lisp-mode)
-          (setq buffer-file-name source-file)
-          (insert ";; removed\n")
-          (goto-char (point-min))
-          (eval-buffer)))
+        (packlet-test-eval-in-file source-file ";; removed\n"))
       (when (file-exists-p source-file)
         (delete-file source-file)))))
 
@@ -476,17 +436,14 @@
            directory
            feature
            "(defvar packlet-test-explain-feature-loaded t)")
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-explain-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-explain-feature\n\
   :after packlet-test-explain-after\n\
   :idle\n\
   :demand t\n\
   :config\n\
   (setq packlet-test-explain-config-ran t))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (let ((before (packlet-explain-feature feature)))
             (should (string-match-p "Loaded: no" before))
             (should (string-match-p "Afters: packlet-test-explain-after" before))
@@ -505,12 +462,7 @@
             (should (string-match-p "Demand: loaded" after))
             (should (string-match-p "Idle: loaded" after))))
       (ignore-errors
-        (with-temp-buffer
-          (emacs-lisp-mode)
-          (setq buffer-file-name source-file)
-          (insert ";; removed\n")
-          (goto-char (point-min))
-          (eval-buffer)))
+        (packlet-test-eval-in-file source-file ";; removed\n"))
       (setq packlet-test-explain-config-ran nil)
       (packlet-test--cleanup-feature feature)
       (packlet-test--cleanup-feature after-feature)
@@ -526,16 +478,13 @@
           (setq packlet-test-tracked-setq 10
                 packlet-test-cleanup-hook nil
                 packlet-test-hook-count 0)
-          (with-temp-buffer
-            (emacs-lisp-mode)
-            (setq buffer-file-name source-file)
-            (insert "(packlet packlet-test-cleanup-feature\n\
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-cleanup-feature\n\
   :setq (packlet-test-tracked-setq 7)\n\
   :hook ((packlet-test-cleanup-hook . (lambda ()\n\
                                         (setq packlet-test-hook-count\n\
                                               (1+ packlet-test-hook-count))))))\n")
-            (goto-char (point-min))
-            (eval-buffer))
           (should (= packlet-test-tracked-setq 7))
           (run-hooks 'packlet-test-cleanup-hook)
           (should (= packlet-test-hook-count 1))

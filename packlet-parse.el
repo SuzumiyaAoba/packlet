@@ -17,8 +17,9 @@
   (defconst packlet--keywords
     '(:file :when :unless :init :setq :custom :load :add-to-list :list :alist :config
             :commands :autoload :mode :remap :derived-mode
-            :hook :hook-setq :hook-call :hook-add :hook-enable :startup :startup-enable
-            :bind :bind-keymap :prefix-map :enable :faces :advice
+            :hook :hook-setq :hook-call :hook-add :hook-enable :hook-when :hook-if-feature
+            :startup :startup-enable
+            :bind :bind-keymap :bind-after-load :prefix-map :enable :faces :advice
             :interpreter :magic :after :after-load :idle :magic-fallback :demand
             :functions :defines))
 
@@ -264,6 +265,20 @@ Each PLIST may contain:
          (symbolp (cadr value))
          (null (cdddr value))))
 
+  (defun packlet--hook-when-entry-p (value)
+    "Return non-nil when VALUE looks like a valid `:hook-when' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (cadr value)
+         (packlet--hook-function-p (caddr value))))
+
+  (defun packlet--hook-if-feature-entry-p (value)
+    "Return non-nil when VALUE looks like a valid `:hook-if-feature' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (symbolp (cadr value))
+         (packlet--hook-function-p (caddr value))))
+
   (defun packlet--startup-entry-p (value)
     "Return non-nil when VALUE looks like a valid `:startup' entry."
     (or (symbolp value)
@@ -316,22 +331,16 @@ a cons cell of (POSITIONALS . OPTION-FORMS)."
               (error nil))))
         (cons items nil))))
 
-  (defun packlet--normalize-hook-options (options)
-    "Normalize `:hook' OPTIONS into a plist."
-    (let* ((parsed (packlet--parse-keyword-options
-                    options
-                    '((:append . packlet--bool-option-p)
-                      (:depth  . numberp)
-                      (:local  . packlet--bool-option-p))
-                    "hook"))
-           (append (alist-get :append parsed))
-           (depth  (alist-get :depth parsed)))
-      (list :depth (or depth (if append 90 0))
-            :local (alist-get :local parsed))))
-
   (defun packlet--non-negative-number-p (v)
     "Return non-nil when V is a non-negative number."
     (and (numberp v) (>= v 0)))
+
+  (defconst packlet--hook-like-split-spec
+    '((:append . nil)
+      (:depth  . numberp)
+      (:local  . nil)
+      (:delay  . numberp))
+    "Option spec for `packlet--split-trailing-keyword-options' in hook-like keywords.")
 
   (defun packlet--normalize-hook-like-options (options context)
     "Normalize hook-like OPTIONS into a plist for CONTEXT."
@@ -347,6 +356,22 @@ a cons cell of (POSITIONALS . OPTION-FORMS)."
       (list :delay (alist-get :delay parsed)
             :depth (or depth (if append 90 0))
             :local (alist-get :local parsed))))
+
+  (defun packlet--normalize-hook-options (options &optional context)
+    "Normalize hook-like OPTIONS into a plist.
+CONTEXT defaults to \"hook\" and is used in validation errors.
+Delegates to `packlet--normalize-hook-like-options', stripping `:delay'."
+    (let ((result (packlet--normalize-hook-like-options
+                   options
+                   (or context "hook"))))
+      (cl-remf result :delay)
+      result))
+
+  (defun packlet--conditional-hook-function (condition function)
+    "Return a hook lambda that calls FUNCTION only when CONDITION is non-nil."
+    `(lambda ()
+       (when ,condition
+         (funcall ,(packlet--hook-function-form function)))))
 
   (defun packlet--normalize-hook-add-options (options)
     "Normalize `:hook-add' OPTIONS into a plist."
@@ -420,6 +445,12 @@ DELAY must be a non-negative number."
          (symbolp (cadr value))
          (cddr value)))
 
+  (defun packlet--bind-after-load-entry-p (value)
+    "Return non-nil when VALUE looks like a valid `:bind-after-load' entry."
+    (and (packlet--proper-list-p value)
+         (symbolp (car-safe value))
+         (cdr value)))
+
   (defun packlet--custom-entry-p (value)
     "Return non-nil when VALUE is a valid `:custom' entry."
     (and (consp value)
@@ -485,10 +516,7 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
            (split
             (packlet--split-trailing-keyword-options
              (cdr value)
-             '((:append . nil)
-               (:depth . numberp)
-               (:local . nil)
-               (:delay . numberp))
+             packlet--hook-like-split-spec
              "hook-setq"))
            (settings (car split))
            (options
@@ -524,10 +552,7 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
            (split
             (packlet--split-trailing-keyword-options
              (cdr value)
-             '((:append . nil)
-               (:depth . numberp)
-               (:local . nil)
-               (:delay . numberp))
+             packlet--hook-like-split-spec
              "hook-call"))
            (positionals (car split))
            (function (car positionals))
@@ -604,6 +629,59 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
      forms :hook-enable
      #'packlet--hook-enable-entry-p
      #'packlet--normalize-hook-enable-entry))
+
+  (defun packlet--normalize-hook-when-entry (value)
+    "Normalize a single `:hook-when' VALUE into a hook entry."
+    (unless (packlet--hook-when-entry-p value)
+      (error "packlet: invalid entry %S for :hook-when" value))
+    (let ((hook (car value))
+          (condition (cadr value))
+          (rest (cddr value))
+          delay)
+      (unless rest
+        (error "packlet: invalid entry %S for :hook-when" value))
+      (unless (packlet--hook-function-p (car rest))
+        (error "packlet: invalid hook function %S" (car rest)))
+      (let ((function (car rest))
+            (options (cdr rest)))
+        (when (and options (numberp (car options)))
+          (setq delay (pop options))
+          (when (< delay 0)
+            (error "packlet: invalid entry %S for :hook-when" value)))
+        (append
+         (list :kind :hook-when
+               :hook hook
+               :function (packlet--conditional-hook-function condition function)
+               :autoload (and (symbolp function) function)
+               :delay delay)
+         (packlet--normalize-hook-options options "hook-when")))))
+
+  (defun packlet--normalize-hook-whens (forms)
+    "Normalize FORMS under `:hook-when' into a flat list of hook entries."
+    (packlet--normalize-entries
+     forms :hook-when
+     #'packlet--hook-when-entry-p
+     #'packlet--normalize-hook-when-entry))
+
+  (defun packlet--normalize-hook-if-feature-entry (value)
+    "Normalize a single `:hook-if-feature' VALUE into a hook entry."
+    (unless (packlet--hook-if-feature-entry-p value)
+      (error "packlet: invalid entry %S for :hook-if-feature" value))
+    (let ((hook (car value))
+          (feature (cadr value))
+          (rest (cddr value)))
+      (plist-put
+       (packlet--normalize-hook-when-entry
+        (cons hook
+              (cons `(featurep ',feature) rest)))
+       :kind :hook-if-feature)))
+
+  (defun packlet--normalize-hook-if-features (forms)
+    "Normalize FORMS under `:hook-if-feature' into a flat list of hook entries."
+    (packlet--normalize-entries
+     forms :hook-if-feature
+     #'packlet--hook-if-feature-entry-p
+     #'packlet--normalize-hook-if-feature-entry))
 
   (defun packlet--normalize-startup-entry (value)
     "Normalize a single `:startup' VALUE into a plist."
@@ -704,8 +782,55 @@ a tuple (FUNCTION FILE INTERACTIVE), or a list of such entries."
              (t
               (error "packlet: invalid entry %S for :bind" entry)))))
          (t
-          (error "packlet: invalid value %S for :bind" form))))
+         (error "packlet: invalid value %S for :bind" form))))
       (nreverse result)))
+
+  (defun packlet--normalize-bind-after-load-entry (value)
+    "Normalize a single `:bind-after-load' VALUE into a flat list of bindings."
+    (unless (packlet--bind-after-load-entry-p value)
+      (error "packlet: invalid entry %S for :bind-after-load" value))
+    (let ((feature (car value))
+          (bindings (packlet--normalize-bindings (cdr value)))
+          result)
+      (unless bindings
+        (error "packlet: invalid entry %S for :bind-after-load" value))
+      (dolist (binding bindings)
+        (pcase binding
+          (`(:global ,key ,command)
+           (push (list :kind :bind-after-load
+                       :feature feature
+                       :keymap 'global-map
+                       :key key
+                       :command command)
+                 result))
+          (`(:map ,keymap ,key ,command)
+           (push (list :kind :bind-after-load
+                       :feature feature
+                       :keymap keymap
+                       :key key
+                       :command command)
+                 result))))
+      (nreverse result)))
+
+  (defun packlet--normalize-bind-after-loads (forms)
+    "Normalize FORMS under `:bind-after-load' into a flat list of bindings."
+    (let (result)
+      (dolist (form forms)
+        (cond
+         ((packlet--bind-after-load-entry-p form)
+          (setq result
+                (append result
+                        (packlet--normalize-bind-after-load-entry form))))
+         ((packlet--proper-list-p form)
+          (dolist (entry form)
+            (unless (packlet--bind-after-load-entry-p entry)
+              (error "packlet: invalid entry %S for :bind-after-load" entry))
+            (setq result
+                  (append result
+                          (packlet--normalize-bind-after-load-entry entry)))))
+         (t
+          (error "packlet: invalid value %S for :bind-after-load" form))))
+      result))
 
   (defun packlet--normalize-list-options (options keyword)
     "Normalize KEYWORD OPTIONS into a plist."

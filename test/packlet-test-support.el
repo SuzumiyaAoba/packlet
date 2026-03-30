@@ -41,8 +41,10 @@
 (defvar packlet-test-managed-list nil)
 (defvar packlet-test-prefix-keyword-map nil)
 (defvar packlet-test-prefix-map-remove-map nil)
+(defvar packlet-test-bind-after-load-map nil)
 (defvar packlet-test-enable-mode nil)
 (defvar packlet-test-tracked-setq 0)
+(defvar packlet-test-hook-when-enabled nil)
 (defcustom packlet-test-tracked-custom 0
   "User option used by `packlet' setting tests."
   :type 'integer
@@ -123,6 +125,40 @@
   "Wrap FORM in DEPTH nested `progn' forms."
   (dotimes (_ depth form)
     (setq form `(progn ,form))))
+
+(defun packlet-test-eval-in-file (source-file code)
+  "Evaluate CODE string in a temp buffer visiting SOURCE-FILE."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (setq buffer-file-name source-file)
+    (insert code)
+    (goto-char (point-min))
+    (eval-buffer)))
+
+(defmacro packlet-test-with-idle-timers (scheduled-var &rest body)
+  "Execute BODY with idle-timer functions stubbed.
+SCHEDULED-VAR is bound to a list that accumulates timer entries.
+Each entry is a plist with :timer, :secs, :repeat, :fn, :args.
+Also binds `timer-id' (counter) and stubs `timerp' and `cancel-timer'."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((timer-id 0)
+         (,scheduled-var nil)
+         (cancelled nil))
+     (cl-letf (((symbol-function 'run-with-idle-timer)
+                (lambda (secs repeat fn &rest args)
+                  (let ((timer (list :timer (cl-incf timer-id))))
+                    (push (list :timer timer :secs secs :repeat repeat
+                                :fn fn :args args)
+                          ,scheduled-var)
+                    timer)))
+               ((symbol-function 'timerp)
+                (lambda (object)
+                  (and (consp object)
+                       (eq (car object) :timer))))
+               ((symbol-function 'cancel-timer)
+                (lambda (timer)
+                  (push timer cancelled))))
+       ,@body)))
 
 (provide 'packlet-test-support)
 
