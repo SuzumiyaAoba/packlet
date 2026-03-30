@@ -1047,7 +1047,106 @@ FEATURE, FILE, and AFTERS provide the packlet context."
                                 :afters afters :sections sections)))
             (when expander
               (setq forms (append forms (funcall expander context normalized)))))))
-      forms)))
+      forms))
+
+  (defun packlet--expand-enable-entry (kind entry index feature site
+                                       source-scope source-file file afters)
+    "Expand a single enable-like ENTRY at INDEX for KIND.
+KIND is either `enable' or `startup-enable'."
+    (let* ((function (plist-get entry :function))
+           (arg-form (plist-get entry :arg))
+           (prefix (symbol-name kind))
+           (suffix (format "%s-%d" prefix index))
+           (applied-var
+            (packlet--generated-symbol
+             (format "packlet--%s-applied" prefix) feature site suffix))
+           (had-value-var
+            (packlet--generated-symbol
+             (format "packlet--%s-bound" prefix) feature site suffix))
+           (previous-value-var
+            (packlet--generated-symbol
+             (format "packlet--%s-previous" prefix) feature site suffix))
+           (enabled-value-var
+            (packlet--generated-symbol
+             (format "packlet--%s-current" prefix) feature site suffix))
+           (func-sym
+            (packlet--generated-symbol
+             (format "packlet--%s" prefix) feature site suffix))
+           (startup-p (eq kind 'startup-enable))
+           (state-id (list site (if startup-p :startup-enable :enable-state) index)))
+      `((defvar ,applied-var nil)
+        (defvar ,had-value-var nil)
+        (defvar ,previous-value-var nil)
+        (defvar ,enabled-value-var nil)
+        (packlet--register-source-entry
+         ',source-scope
+         ',state-id
+         (lambda ()
+           (setq ,applied-var nil)
+           (packlet--unbind-variable ',had-value-var)
+           (packlet--unbind-variable ',previous-value-var)
+           (packlet--unbind-variable ',enabled-value-var)
+           ,@(when startup-p
+               `((packlet--maybe-autoload ',function ,file nil)))
+           (defalias ',func-sym
+             (lambda ()
+               ,(if startup-p
+                    `(unless ,applied-var
+                       (setq ,applied-var t
+                             ,had-value-var (boundp ',function))
+                       (if ,had-value-var
+                           (setq ,previous-value-var ,function)
+                         (packlet--unbind-variable ',previous-value-var))
+                       (funcall ',function ,arg-form)
+                       (unless (boundp ',function)
+                         (error "packlet: %S did not leave a mode variable bound"
+                                ',function))
+                       (setq ,enabled-value-var ,function)
+                       (remove-hook 'after-init-hook ',func-sym))
+                  `(when (and (not ,applied-var)
+                              (featurep ',feature)
+                              (packlet--all-features-loaded-p ',afters))
+                     (setq ,applied-var t
+                           ,had-value-var (boundp ',function))
+                     (if ,had-value-var
+                         (setq ,previous-value-var ,function)
+                       (packlet--unbind-variable ',previous-value-var))
+                     (funcall ',function ,arg-form)
+                     (unless (boundp ',function)
+                       (error "packlet: %S did not leave a mode variable bound"
+                              ',function))
+                     (setq ,enabled-value-var ,function)))))
+           ,@(if startup-p
+                 `((if after-init-time
+                       (funcall (symbol-function ',func-sym))
+                     (add-hook 'after-init-hook ',func-sym)))
+               nil))
+         (lambda ()
+           ,@(when startup-p
+               `((remove-hook 'after-init-hook ',func-sym)))
+           (when (and ,applied-var
+                      (boundp ',function)
+                      (equal ,function ,enabled-value-var))
+             (funcall ',function
+                      (if (and ,had-value-var ,previous-value-var)
+                          ,previous-value-var
+                        0))
+             (when (and (not ,had-value-var)
+                        (boundp ',function)
+                        (null ,function))
+               (makunbound ',function)))
+           (packlet--unbind-variable ',applied-var)
+           (packlet--unbind-variable ',had-value-var)
+           (packlet--unbind-variable ',previous-value-var)
+           (packlet--unbind-variable ',enabled-value-var)
+           (packlet--unbind-function ',func-sym)))
+        ,@(unless startup-p
+            `((packlet--register-after-load
+               ',(list site :enable index)
+               ',feature
+               ',func-sym
+               ',afters
+               ,source-file)))))))
 
 ;;;###autoload
 (defun packlet-define-keyword (keyword &rest props)

@@ -372,88 +372,9 @@
           for entry in enables
           for index from 0
           append
-          (let* ((function (plist-get entry :function))
-                 (arg-form (plist-get entry :arg))
-                 (applied-var
-                  (packlet--generated-symbol
-                   "packlet--enable-applied"
-                   feature
-                   site
-                   (format "enable-%d" index)))
-                 (had-value-var
-                  (packlet--generated-symbol
-                   "packlet--enable-bound"
-                   feature
-                   site
-                   (format "enable-%d" index)))
-                 (previous-value-var
-                  (packlet--generated-symbol
-                   "packlet--enable-previous"
-                   feature
-                   site
-                   (format "enable-%d" index)))
-                 (enabled-value-var
-                  (packlet--generated-symbol
-                   "packlet--enable-current"
-                   feature
-                   site
-                   (format "enable-%d" index)))
-                 (enable-function
-                  (packlet--generated-symbol
-                   "packlet--enable"
-                   feature
-                   site
-                   (format "enable-%d" index))))
-            `((defvar ,applied-var nil)
-              (defvar ,had-value-var nil)
-              (defvar ,previous-value-var nil)
-              (defvar ,enabled-value-var nil)
-              (packlet--register-source-entry
-               ',source-scope
-               ',(list site :enable-state index)
-               (lambda ()
-                 (setq ,applied-var nil)
-                 (packlet--unbind-variable ',had-value-var)
-                 (packlet--unbind-variable ',previous-value-var)
-                 (packlet--unbind-variable ',enabled-value-var)
-                 (defalias ',enable-function
-                   (lambda ()
-                     (when (and (not ,applied-var)
-                                (featurep ',feature)
-                                (packlet--all-features-loaded-p ',afters))
-                       (setq ,applied-var t
-                             ,had-value-var (boundp ',function))
-                       (if ,had-value-var
-                           (setq ,previous-value-var ,function)
-                         (packlet--unbind-variable ',previous-value-var))
-                       (funcall ',function ,arg-form)
-                       (unless (boundp ',function)
-                         (error "packlet: %S did not leave a mode variable bound"
-                                ',function))
-                       (setq ,enabled-value-var ,function)))))
-               (lambda ()
-                 (when (and ,applied-var
-                            (boundp ',function)
-                            (equal ,function ,enabled-value-var))
-                   (funcall ',function
-                            (if (and ,had-value-var ,previous-value-var)
-                                ,previous-value-var
-                              0))
-                   (when (and (not ,had-value-var)
-                              (boundp ',function)
-                              (null ,function))
-                     (makunbound ',function)))
-                 (packlet--unbind-variable ',applied-var)
-                 (packlet--unbind-variable ',had-value-var)
-                 (packlet--unbind-variable ',previous-value-var)
-                 (packlet--unbind-variable ',enabled-value-var)
-                 (packlet--unbind-function ',enable-function)))
-              (packlet--register-after-load
-               ',(list site :enable index)
-               ',feature
-               ',enable-function
-               ',afters
-               ,source-file))))
+          (packlet--expand-enable-entry
+           'enable entry index feature site
+           source-scope source-file file afters))
        ,@(cl-loop
           for entry in faces
           for index from 0
@@ -816,86 +737,9 @@
           for entry in startup-enables
           for index from 0
           append
-          (let* ((function (plist-get entry :function))
-                 (arg-form (plist-get entry :arg))
-                 (applied-var
-                  (packlet--generated-symbol
-                   "packlet--startup-enable-applied"
-                   feature
-                   site
-                   (format "startup-enable-%d" index)))
-                 (had-value-var
-                  (packlet--generated-symbol
-                   "packlet--startup-enable-bound"
-                   feature
-                   site
-                   (format "startup-enable-%d" index)))
-                 (previous-value-var
-                  (packlet--generated-symbol
-                   "packlet--startup-enable-previous"
-                   feature
-                   site
-                   (format "startup-enable-%d" index)))
-                 (enabled-value-var
-                  (packlet--generated-symbol
-                   "packlet--startup-enable-current"
-                   feature
-                   site
-                   (format "startup-enable-%d" index)))
-                 (startup-function
-                  (packlet--generated-symbol
-                   "packlet--startup-enable"
-                   feature
-                   site
-                   (format "startup-enable-%d" index))))
-            `((defvar ,applied-var nil)
-              (defvar ,had-value-var nil)
-              (defvar ,previous-value-var nil)
-              (defvar ,enabled-value-var nil)
-              (packlet--register-source-entry
-               ',source-scope
-               ',(list site :startup-enable index)
-               (lambda ()
-                 (setq ,applied-var nil)
-                 (packlet--unbind-variable ',had-value-var)
-                 (packlet--unbind-variable ',previous-value-var)
-                 (packlet--unbind-variable ',enabled-value-var)
-                 (packlet--maybe-autoload ',function ,file nil)
-                 (defalias ',startup-function
-                   (lambda ()
-                     (unless ,applied-var
-                       (setq ,applied-var t
-                             ,had-value-var (boundp ',function))
-                       (if ,had-value-var
-                           (setq ,previous-value-var ,function)
-                         (packlet--unbind-variable ',previous-value-var))
-                       (funcall ',function ,arg-form)
-                       (unless (boundp ',function)
-                         (error "packlet: %S did not leave a mode variable bound"
-                                ',function))
-                       (setq ,enabled-value-var ,function)
-                       (remove-hook 'after-init-hook ',startup-function))))
-                 (if after-init-time
-                     (funcall (symbol-function ',startup-function))
-                   (add-hook 'after-init-hook ',startup-function)))
-               (lambda ()
-                 (remove-hook 'after-init-hook ',startup-function)
-                 (when (and ,applied-var
-                            (boundp ',function)
-                            (equal ,function ,enabled-value-var))
-                   (funcall ',function
-                            (if (and ,had-value-var ,previous-value-var)
-                                ,previous-value-var
-                              0))
-                   (when (and (not ,had-value-var)
-                              (boundp ',function)
-                              (null ,function))
-                     (makunbound ',function)))
-                 (packlet--unbind-variable ',applied-var)
-                 (packlet--unbind-variable ',had-value-var)
-                 (packlet--unbind-variable ',previous-value-var)
-                 (packlet--unbind-variable ',enabled-value-var)
-                 (packlet--unbind-function ',startup-function))))))
+          (packlet--expand-enable-entry
+           'startup-enable entry index feature site
+           source-scope source-file file afters))
        ,@(cl-loop
           for binding in bindings
           for index from 0
