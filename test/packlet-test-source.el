@@ -14,6 +14,21 @@
 (defvar packlet-test-hook-count)
 (defvar packlet-test-explain-config-ran)
 
+(ert-deftest packlet-test-register-source-entry-without-scope-skips-bookkeeping ()
+  (let ((packlet--active-source-scope nil)
+        (install-count 0)
+        (cleanup-count 0))
+    (cl-letf (((symbol-function 'packlet--make-source-entry)
+               (lambda (&rest _args)
+                 (ert-fail "Created a source entry without a source scope"))))
+      (packlet--register-source-entry
+       nil
+       'static-entry
+       (lambda () (cl-incf install-count))
+       (lambda () (cl-incf cleanup-count))))
+    (should (= install-count 1))
+    (should (= cleanup-count 0))))
+
 (ert-deftest packlet-test-run-source-entry-cleanups-continues-after-error ()
   (let ((scope '(:buffer cleanup-buffer))
         (calls nil)

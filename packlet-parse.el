@@ -1105,17 +1105,6 @@ an explicit `:compare' option."
         (`(,form) form)
         (_ (error "packlet: :idle accepts at most one form")))))
 
-  (defun packlet--idle-delay (value)
-    "Normalize VALUE for `:idle'."
-    (cond
-     ((null value) nil)
-     ((eq value t) 1.0)
-     ((and (numberp value)
-           (>= value 0))
-      value)
-     (t
-      (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
-
   (defun packlet--guard-form (sections)
     "Return the combined guard form for `:when' and `:unless' in SECTIONS."
     (let ((when-form (packlet--keyword-form sections :when))

@@ -98,6 +98,17 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 (defvar packlet--pending-source-entries nil
   "Entries registered during the active `packlet' evaluation session.")
 
+(defun packlet--idle-delay (value)
+  "Normalize runtime VALUE for `:idle'."
+  (cond
+   ((null value) nil)
+   ((eq value t) 1.0)
+   ((and (numberp value)
+         (>= value 0))
+    value)
+   (t
+    (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
+
 (defun packlet--warn (format-string &rest args)
   "Emit a `packlet' warning using FORMAT-STRING and ARGS."
   (when packlet-warn-on-missing-libraries
@@ -240,22 +251,23 @@ Return entries whose cleanup failed."
 
 (defun packlet--register-source-entry (scope id install cleanup)
   "Install and track a source-backed entry under ID for SCOPE."
-  (let* ((scope (packlet--normalize-source-scope
-                 (or scope packlet--active-source-scope)))
-         (entry (packlet--make-source-entry
-                 :id id
-                 :install install
-                 :cleanup cleanup)))
-    (funcall install)
-    (when scope
-      (if (equal scope packlet--active-source-scope)
-          (setq packlet--pending-source-entries
-                (packlet--replace-source-entry packlet--pending-source-entries
-                                              entry))
-        (packlet--set-source-entries
-         scope
-         (packlet--replace-source-entry (packlet--source-entries scope)
-                                        entry))))))
+  (let ((scope (packlet--normalize-source-scope
+                (or scope packlet--active-source-scope))))
+    (if (null scope)
+        (funcall install)
+      (let ((entry (packlet--make-source-entry
+                    :id id
+                    :install install
+                    :cleanup cleanup)))
+        (funcall install)
+        (if (equal scope packlet--active-source-scope)
+            (setq packlet--pending-source-entries
+                  (packlet--replace-source-entry packlet--pending-source-entries
+                                                entry))
+          (packlet--set-source-entries
+           scope
+           (packlet--replace-source-entry (packlet--source-entries scope)
+                                          entry)))))))
 
 (defun packlet--autoloads-file (file)
   "Return the autoload library name for FILE."
