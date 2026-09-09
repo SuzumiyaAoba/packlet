@@ -11,6 +11,7 @@ TEST_FILES = \
 	test/packlet-test-bindings.el \
 	test/packlet-test-keywords.el \
 	test/packlet-test-hooks.el \
+	test/packlet-test-static.el \
 	test/packlet-test.el
 
 compile:

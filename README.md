@@ -105,6 +105,31 @@ Clone this repository and add it to `load-path`:
 - `packlet-cleanup-source` removes the registrations currently owned by a file
   or buffer scope.
 
+## Compiled configurations
+
+For immutable, generated configurations, bind `packlet-expand-source-tracking`
+to `nil` while byte-compiling. This emits direct settings and omits source
+metadata, cleanup closures, and registration calls. The default remains `t` for
+interactive editing; code compiled with tracking disabled cannot be rolled back
+or removed with the source cleanup commands.
+
+```elisp
+(require 'packlet)
+(let ((packlet-expand-source-tracking nil))
+  (byte-compile-file "init.el"))
+```
+
+The compiled init file can use `(eval-when-compile (require 'packlet))` and
+`(require 'packlet-runtime)` to leave parsing and source tracking out of startup.
+The runtime includes the helpers needed by both `:idle` and `:demand`.
+Generated helper names use a stable digest so the same expansion site has the
+same names across fresh Emacs processes.
+
+When a package manager already supplies autoloads, set
+`packlet-load-package-autoloads` to `nil` to avoid repeated autoload-file lookups.
+Fallback autoloads still work; commands in sub-libraries must already be
+autoloaded or declare their file explicitly with `:autoload`.
+
 ## Keywords
 
 - `:file`

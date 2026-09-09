@@ -15,6 +15,7 @@
 (require 'packlet-test-bindings)
 (require 'packlet-test-keywords)
 (require 'packlet-test-hooks)
+(require 'packlet-test-static)
 
 (provide 'packlet-test)
 

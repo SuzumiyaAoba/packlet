@@ -98,12 +98,6 @@
         (_
          nil))))
 
-(defun packlet--site-metadata-put (site property value)
-  "Set PROPERTY to VALUE for expansion SITE metadata."
-  (when-let ((metadata (copy-sequence (gethash site packlet--site-features))))
-    (puthash site (plist-put metadata property value)
-             packlet--site-features)))
-
 (defun packlet--source-entry-feature (entry)
   "Return the configured feature associated with source ENTRY."
   (when-let ((site (packlet--find-entry-site (packlet--source-entry-id entry))))

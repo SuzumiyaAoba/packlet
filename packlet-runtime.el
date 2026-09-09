@@ -22,6 +22,22 @@
   :type 'boolean
   :group 'packlet)
 
+(defcustom packlet-load-package-autoloads t
+  "Whether to load package autoload files before installing fallback autoloads.
+Set this to nil when autoloads are managed externally, or when every
+sub-library command is declared explicitly with `:autoload'."
+  :type 'boolean
+  :group 'packlet)
+
+(defun packlet--idle-delay (value)
+  "Normalize VALUE for `:idle'."
+  (cond
+   ((null value) nil)
+   ((eq value t) 1.0)
+   ((and (numberp value) (>= value 0)) value)
+   (t
+    (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
+
 (defun packlet--all-features-loaded-p (features)
   "Return non-nil when every feature in FEATURES is loaded."
   (cl-every #'featurep features))
@@ -79,6 +95,12 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 
 (defvar packlet--site-features (make-hash-table :test #'equal)
   "Feature metadata keyed by packlet expansion site.")
+
+(defun packlet--site-metadata-put (site property value)
+  "Set PROPERTY to VALUE for expansion SITE metadata."
+  (when-let ((metadata (copy-sequence (gethash site packlet--site-features))))
+    (puthash site (plist-put metadata property value)
+             packlet--site-features)))
 
 (cl-defstruct (packlet--source-entry
                (:constructor packlet--make-source-entry))
@@ -240,22 +262,20 @@ Return entries whose cleanup failed."
 
 (defun packlet--register-source-entry (scope id install cleanup)
   "Install and track a source-backed entry under ID for SCOPE."
-  (let* ((scope (packlet--normalize-source-scope
-                 (or scope packlet--active-source-scope)))
-         (entry (packlet--make-source-entry
-                 :id id
-                 :install install
-                 :cleanup cleanup)))
+  (let ((scope (packlet--normalize-source-scope
+                (or scope packlet--active-source-scope))))
     (funcall install)
     (when scope
-      (if (equal scope packlet--active-source-scope)
-          (setq packlet--pending-source-entries
-                (packlet--replace-source-entry packlet--pending-source-entries
-                                              entry))
-        (packlet--set-source-entries
-         scope
-         (packlet--replace-source-entry (packlet--source-entries scope)
-                                        entry))))))
+      (let ((entry (packlet--make-source-entry
+                    :id id :install install :cleanup cleanup)))
+        (if (equal scope packlet--active-source-scope)
+            (setq packlet--pending-source-entries
+                  (packlet--replace-source-entry packlet--pending-source-entries
+                                                entry))
+          (packlet--set-source-entries
+           scope
+           (packlet--replace-source-entry (packlet--source-entries scope)
+                                          entry)))))))
 
 (defun packlet--autoloads-file (file)
   "Return the autoload library name for FILE."
@@ -263,11 +283,12 @@ Return entries whose cleanup failed."
 
 (defun packlet--maybe-load-autoloads (file)
   "Load FILE's autoload definitions once when available."
-  (let ((autoloads-file (packlet--autoloads-file file)))
-    (unless (gethash autoloads-file packlet--loaded-autoloads)
-      (when (locate-library autoloads-file)
-        (when (load autoloads-file nil t)
-          (puthash autoloads-file t packlet--loaded-autoloads))))))
+  (when packlet-load-package-autoloads
+    (let ((autoloads-file (packlet--autoloads-file file)))
+      (unless (gethash autoloads-file packlet--loaded-autoloads)
+        (when (locate-library autoloads-file)
+          (when (load autoloads-file nil t)
+            (puthash autoloads-file t packlet--loaded-autoloads)))))))
 
 (defun packlet--load-library (file)
   "Load FILE and warn when it cannot be found."

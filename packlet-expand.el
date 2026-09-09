@@ -11,9 +11,33 @@
 
 (require 'packlet-parse)
 
+(defcustom packlet-expand-source-tracking t
+  "Whether macro expansion emits source cleanup and reevaluation bookkeeping.
+Bind this to nil while byte-compiling an immutable configuration to emit
+smaller code.  The resulting forms cannot be cleaned up or rolled back
+with packlet's source commands.  Normal interactive expansion is unchanged."
+  :type 'boolean
+  :group 'packlet)
+
+(cl-define-compiler-macro packlet--register-source-entry
+    (&whole form _scope _id install _cleanup)
+  "Compile only INSTALL when source tracking is disabled.
+Let the compiler identify calls so quoted data in user forms stays intact."
+  (if packlet-expand-source-tracking
+      form
+    `(funcall ,install)))
+
 (defun packlet--expand-settings (kind feature site source-scope settings)
   "Expand SETTINGS for KIND in FEATURE at SITE under SOURCE-SCOPE."
-  (cl-loop
+  (if (not packlet-expand-source-tracking)
+      (mapcar (lambda (setting)
+                (list (pcase kind
+                        (:setq 'setq)
+                        (:custom 'setopt)
+                        (_ (error "packlet: unsupported setting kind %S" kind)))
+                      (car setting) (cadr setting)))
+              settings)
+    (cl-loop
    for setting in settings
    for index from 0
    append
@@ -68,7 +92,7 @@
               (makunbound ',variable)))
           (packlet--unbind-variable ',value-var)
           (packlet--unbind-variable ',had-value-var)
-          (packlet--unbind-variable ',previous-value-var)))))))
+          (packlet--unbind-variable ',previous-value-var))))))))
 
 ;;;###autoload
 (defmacro packlet (feature &rest body)
@@ -78,7 +102,8 @@
     (error "packlet: FEATURE must be a symbol"))
   (let* ((sections (packlet--parse-body body))
          (site (packlet--expansion-site feature body))
-         (source-file (packlet--site-file site))
+         (source-file (and packlet-expand-source-tracking
+                           (packlet--site-file site)))
          (source-scope (and source-file
                             (list :file source-file)))
          (has-guard (or (packlet--has-section-p sections :when)
@@ -197,7 +222,8 @@
           (lambda (function)
             `(declare-function ,function ,file))
           functions)
-              (packlet--register-source-entry
+              ,@(when packlet-expand-source-tracking
+                  `((packlet--register-source-entry
         ',source-scope
         ',(list :site-feature site feature)
         (lambda ()
@@ -212,7 +238,7 @@
                          :has-idle ,(and (packlet--has-section-p sections :idle) t))
                    packlet--site-features))
         (lambda ()
-          (remhash ',site packlet--site-features)))
+          (remhash ',site packlet--site-features)))))
               ,@(packlet--expand-settings :setq feature site source-scope setq-forms)
               ,@(packlet--expand-settings :custom feature site source-scope custom-forms)
               ,@(mapcar
@@ -989,7 +1015,8 @@
               ,source-file)))
        ,@(when (packlet--has-section-p sections :demand)
            `((when ,demand-form
-               (packlet--site-metadata-put ',site :demand-enabled t)
+               ,@(when packlet-expand-source-tracking
+                   `((packlet--site-metadata-put ',site :demand-enabled t)))
                (packlet--register-demand-load
                 ',(list site :demand)
                 ',feature

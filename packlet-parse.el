@@ -111,9 +111,16 @@ Each PLIST may contain:
 
   (defun packlet--generated-symbol (prefix feature site &optional suffix)
     "Return an interned helper symbol for PREFIX, FEATURE, SITE, and SUFFIX."
-    (let ((hash (logand most-positive-fixnum
-                        (sxhash-equal (list prefix feature site suffix)))))
-      (intern (format "%s-%s-%s-%x"
+    (let* ((print-length nil)
+           (print-level nil)
+           (print-escape-nonascii t)
+           (print-quoted t)
+           (print-gensym t)
+           (hash (substring
+                  (secure-hash 'sha256
+                               (prin1-to-string (list prefix feature site suffix)))
+                  0 16)))
+      (intern (format "%s-%s-%s-%s"
                       prefix
                       (symbol-name feature)
                       (or suffix "main")
@@ -1104,17 +1111,6 @@ an explicit `:compare' option."
         ('() t)
         (`(,form) form)
         (_ (error "packlet: :idle accepts at most one form")))))
-
-  (defun packlet--idle-delay (value)
-    "Normalize VALUE for `:idle'."
-    (cond
-     ((null value) nil)
-     ((eq value t) 1.0)
-     ((and (numberp value)
-           (>= value 0))
-      value)
-     (t
-      (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
 
   (defun packlet--guard-form (sections)
     "Return the combined guard form for `:when' and `:unless' in SECTIONS."
