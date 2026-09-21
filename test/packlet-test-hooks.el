@@ -15,6 +15,8 @@
 (defvar packlet-test-hook-add-count)
 (defvar packlet-test-hook-enable-mode nil)
 (defvar packlet-test-startup-enable-mode nil)
+(defvar packlet-test-argument-hook nil)
+(defvar packlet-test-hook-arguments nil)
 
 (declare-function packlet-test-startup-hook "packlet-test-multi-hook-feature" ())
 (declare-function packlet-test-major-mode-hook "packlet-test-multi-hook-feature" ())
@@ -71,6 +73,68 @@
          packlet-test-startup-hook-ran
          packlet-test-major-mode-hook-ran))
       (delete-directory directory t))))
+
+(ert-deftest packlet-test-hooks-forward-arguments-and-return-values ()
+  (dolist (keyword '(:hook :hook-when :hook-if-feature))
+    (dolist (delay '(nil 0.5))
+      (let ((packlet-test-argument-hook nil)
+            (packlet-test-hook-arguments nil))
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (packlet-test-with-idle-timers scheduled
+            (eval
+             `(packlet packlet-test-hook-arguments-feature
+                ,keyword
+                (packlet-test-argument-hook
+                 ,@(pcase keyword
+                     (:hook-when '(t))
+                     (:hook-if-feature '(emacs)))
+                 (lambda (&rest args)
+                   (setq packlet-test-hook-arguments args)
+                   'done)
+                 ,@(when delay (list :delay delay)))))
+            (let ((result (run-hook-with-args-until-success
+                           'packlet-test-argument-hook 1 2 3)))
+              (if delay
+                  (progn
+                    (should-not packlet-test-hook-arguments)
+                    (should (= (length scheduled) 1))
+                    (should (= (plist-get (car scheduled) :secs) delay))
+                    (should (eq (packlet-test--invoke-scheduled-timer
+                                 (car scheduled))
+                                'done)))
+                (should (eq result 'done))
+                (should-not scheduled)))
+            (should (equal packlet-test-hook-arguments '(1 2 3)))))))))
+
+(ert-deftest packlet-test-hook-call-uses-explicit-not-hook-arguments ()
+  (dolist (delay '(nil 0.5))
+    (let ((packlet-test-argument-hook nil)
+          (packlet-test-hook-count 0))
+      (with-temp-buffer
+        (emacs-lisp-mode)
+        (packlet-test-with-idle-timers scheduled
+          (eval
+           `(packlet packlet-test-hook-call-arguments
+              :hook-call
+              (packlet-test-argument-hook packlet-test-hook-enable-counter 2
+               ,@(when delay (list :delay delay)))))
+          (run-hook-with-args 'packlet-test-argument-hook 99)
+          (when delay
+            (should (= packlet-test-hook-count 0))
+            (packlet-test--invoke-scheduled-timer (car scheduled)))
+          (should (= packlet-test-hook-count 2)))))))
+
+(ert-deftest packlet-test-hook-when-does-not-capture-user-variables ()
+  (let ((packlet-test-argument-hook nil)
+        (args 'enabled)
+        (calls nil))
+    (packlet packlet-test-hook-hygiene
+      :hook-when
+      (packlet-test-argument-hook (eq args 'enabled)
+       (lambda (value) (push (list args value) calls))))
+    (run-hook-with-args 'packlet-test-argument-hook 'event)
+    (should (equal calls '((enabled event))))))
 
 (ert-deftest packlet-test-delayed-hook-schedules-idle-timer ()
   "Delayed hook entries should schedule an idle timer instead of calling directly."

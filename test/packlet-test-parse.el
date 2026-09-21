@@ -59,6 +59,9 @@
                  '(and foo (not bar))))
   (should (equal (packlet--guard-form '((:unless bar)))
                  '(not bar)))
+  (should (equal (packlet--guard-form '((:unless nil))) '(not nil)))
+  (should (equal (packlet--guard-form '((:when nil) (:unless foo)))
+                 '(and nil (not foo))))
   (should-not (packlet--guard-form nil)))
 
 (ert-deftest packlet-test-idle-delay-validates-values ()
@@ -226,43 +229,66 @@
        :local nil)))))
 
 (ert-deftest packlet-test-normalize-hook-whens ()
-  (should
-   (equal
-    (packlet--normalize-hook-whens
-     '((packlet-test-hook-a
-        (featurep 'packlet-test-feature)
-        packlet-test-hook-enable-mode
-        :append t)))
-    '((:kind :hook-when
-       :hook packlet-test-hook-a
-       :function
-       (lambda ()
-         (when (featurep 'packlet-test-feature)
-           (funcall #'packlet-test-hook-enable-mode)))
-       :autoload packlet-test-hook-enable-mode
-       :delay nil
-       :depth 90
-       :local nil)))))
+  (let* ((entries
+          (packlet--normalize-hook-whens
+           '((packlet-test-hook-a
+              (featurep 'packlet-test-feature)
+              packlet-test-hook-enable-mode
+              :append t))))
+         (args (cadr (cadr (plist-get (car entries) :function)))))
+    (should
+     (equal entries
+            `((:kind :hook-when
+               :hook packlet-test-hook-a
+               :function
+               (lambda (&rest ,args)
+                 (when (featurep 'packlet-test-feature)
+                   (apply #'packlet-test-hook-enable-mode ,args)))
+               :autoload packlet-test-hook-enable-mode
+               :delay nil
+               :depth 90
+               :local nil))))))
 
 (ert-deftest packlet-test-normalize-hook-if-features ()
-  (should
-   (equal
-    (packlet--normalize-hook-if-features
-     '((packlet-test-hook-a
-        packlet-test-feature
-        packlet-test-hook-enable-mode
-        0.5
-        :local t)))
-    '((:kind :hook-if-feature
-       :hook packlet-test-hook-a
-       :function
-       (lambda ()
-         (when (featurep 'packlet-test-feature)
-           (funcall #'packlet-test-hook-enable-mode)))
-       :autoload packlet-test-hook-enable-mode
-       :delay 0.5
-       :depth 0
-       :local t)))))
+  (let* ((entries
+          (packlet--normalize-hook-if-features
+           '((packlet-test-hook-a
+              packlet-test-feature
+              packlet-test-hook-enable-mode
+              0.5
+              :local t))))
+         (args (cadr (cadr (plist-get (car entries) :function)))))
+    (should
+     (equal entries
+            `((:kind :hook-if-feature
+               :hook packlet-test-hook-a
+               :function
+               (lambda (&rest ,args)
+                 (when (featurep 'packlet-test-feature)
+                   (apply #'packlet-test-hook-enable-mode ,args)))
+               :autoload packlet-test-hook-enable-mode
+               :delay 0.5
+               :depth 0
+               :local t))))))
+
+(ert-deftest packlet-test-hook-delay-options-are-preserved-and-validated ()
+  (dolist (spec '((packlet--normalize-hook-entry (packlet-test-hook-a ignore))
+                  (packlet--normalize-hook-when-entry (packlet-test-hook-a t ignore))
+                  (packlet--normalize-hook-if-feature-entry
+                   (packlet-test-hook-a emacs ignore))))
+    (pcase-let ((`(,normalize ,entry) spec))
+      (dolist (delay '(0 0.5))
+        (should (equal (plist-get (funcall normalize
+                                          (append entry (list :delay delay)))
+                                 :delay)
+                       delay))
+        (should (equal (plist-get (funcall normalize
+                                          (append entry (list delay)))
+                                 :delay)
+                       delay)))
+      (dolist (options '((:delay -1) (:delay later) (:delay)
+                         (0.5 :delay 1)))
+        (should-error (funcall normalize (append entry options)))))))
 
 (ert-deftest packlet-test-normalize-startups ()
   (should

@@ -88,7 +88,10 @@ Clone this repository and add it to `load-path`:
   `:magic-fallback`, `:after-load`, `:idle`, and `:demand` registrations
   from that source instead of stacking duplicates.
 - File-backed reevaluation is transactional. If the new evaluation fails part
-  way through, `packlet` restores the previously working registrations.
+  way through, `packlet` cleans up partially installed registrations and restores
+  the previously working registrations.
+- Mode alist cleanup removes only entries added by the declaration, preserving
+  matching entries that were already present.
 - Direct `eval` is also tracked. In Lisp buffers, nested forms containing
   `packlet` are detected. In non-Lisp buffers, top-level `packlet` forms are
   tracked.
@@ -188,8 +191,11 @@ autoloaded or declare their file explicitly with `:autoload`.
   `magic-fallback-mode-alist`.
 - `:hook`
   `(some-hook . some-function)` pairs added with `add-hook`.
-  You can also use `(some-hook some-function delay)` to run the function from
-  an idle timer after the hook fires. List-style entries additionally accept
+  Hook arguments are forwarded to the function, and immediate calls preserve
+  its return value. You can also use `(some-hook some-function delay)` or
+  `(some-hook some-function :delay delay)` to run the function from an idle timer
+  after the hook fires, retaining the hook arguments. Specify only one delay
+  form. List-style entries additionally accept
   `:append t`, `:depth N`, and `:local t`, for example
   `(some-hook some-function :append t)` or
   `(some-hook some-function delay :depth -10 :local t)`.
@@ -206,7 +212,8 @@ autoloaded or declare their file explicitly with `:autoload`.
   call, for example
   `(window-setup-hook set-frame-parameter nil 'fullscreen 'fullboth)`.
   Trailing `:delay`, `:append`, `:depth`, and `:local` options are also
-  supported.
+  supported. This and the other hook setup helpers use their declared settings
+  or arguments rather than forwarding hook arguments.
 - `:hook-add`
   `(some-hook target-hook function)` entries that add `function` to
   `target-hook` when `some-hook` runs. `function` must be a symbol.
@@ -223,8 +230,9 @@ autoloaded or declare their file explicitly with `:autoload`.
   `(org-mode-hook display-line-numbers-mode)`.
 - `:hook-when`
   `(some-hook condition function)` entries that call `function` from the hook
-  only when `condition` is non-nil at hook run time. The same trailing
-  `:delay`, `:append`, and `:local` options as `:hook` are supported.
+  only when `condition` is non-nil at hook run time (or timer run time when
+  delayed). Hook arguments are forwarded. The same positional delay and trailing
+  `:delay`, `:append`, `:depth`, and `:local` options as `:hook` are supported.
 - `:hook-if-feature`
   `(some-hook feature function)` entries that call `function` from the hook
   only when `feature` is currently loaded. This is a shorthand for
@@ -274,7 +282,8 @@ autoloaded or declare their file explicitly with `:autoload`.
   active.
 - `:after-load`
   `(feature body...)` forms evaluated after an arbitrary feature loads, even if
-  it is not the package feature being configured.
+  it is not the package feature being configured. If the feature is already
+  loaded, the body runs once immediately on registration.
 - `:idle`
   Require the feature after startup on the next idle period. With no value,
   this defaults to `1.0`. A numeric value changes the idle delay in seconds.

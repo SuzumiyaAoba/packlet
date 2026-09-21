@@ -174,6 +174,57 @@
         (should (equal cleanup-calls '(:old :new)))
         (should (= (length failed) 1))))))
 
+(ert-deftest packlet-test-source-session-cleans-up-partial-install ()
+  (with-temp-buffer
+    (let ((scope (list :buffer (current-buffer)))
+          (installed nil)
+          (cleaned nil))
+      (should-error
+       (packlet--with-source-session
+        scope nil
+        (lambda ()
+          (packlet--register-source-entry
+           scope 'partial
+           (lambda ()
+             (setq installed t)
+             (error "Installation failed"))
+           (lambda ()
+             (setq installed nil
+                   cleaned t))))))
+      (should cleaned)
+      (should-not installed)
+      (should-not (packlet--source-entries scope)))))
+
+(ert-deftest packlet-test-file-reeval-after-load-error-restores-old-handler ()
+  (let ((source-file (make-temp-file "packlet-test-handler-rollback-" nil ".el"))
+        (packlet--after-load-handlers (make-hash-table :test #'eq))
+        (packlet--after-load-dispatchers (make-hash-table :test #'eq))
+        (after-load-alist nil)
+        (packlet-test-hook-count 0))
+    (unwind-protect
+        (progn
+          (packlet-test-eval-in-file
+           source-file
+           "(packlet packlet-test-old-handler
+              :after-load (emacs (cl-incf packlet-test-hook-count)))")
+          (should (= packlet-test-hook-count 1))
+          (should-error
+           (packlet-test-eval-in-file
+            source-file
+            "(packlet packlet-test-failed-handler
+               :after-load (emacs (error \"Installation failed\")))"))
+          (should (= (length (packlet--after-load-handler-entries 'emacs)) 1))
+          (should (= (hash-table-count packlet--after-load-dispatchers) 1))
+          (setq packlet-test-hook-count 0)
+          (packlet--run-after-load-handlers 'emacs)
+          (should (= packlet-test-hook-count 1))
+          (packlet-cleanup-source source-file)
+          (should-not (packlet--after-load-handler-entries 'emacs))
+          (should-not (gethash 'emacs packlet--after-load-dispatchers))
+          (should-not (assq 'emacs after-load-alist)))
+      (packlet-cleanup-source source-file)
+      (delete-file source-file))))
+
 (ert-deftest packlet-test-file-reeval-error-rolls-back-old-hook ()
   (let ((source-file (make-temp-file "packlet-test-rollback-" nil ".el")))
     (defvar packlet-test-rollback-hook nil)

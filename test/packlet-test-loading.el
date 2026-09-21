@@ -425,6 +425,24 @@
       (packlet-test--cleanup-feature 'packlet-test-after-load-dep)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-after-load-already-loaded-runs-once-per-registration ()
+  (let ((packlet--after-load-handlers (make-hash-table :test #'eq))
+        (packlet--after-load-dispatchers (make-hash-table :test #'eq))
+        (after-load-alist nil)
+        (calls nil))
+    (packlet--register-after-load-handler
+     'emacs 'first (lambda () (push 'first calls)))
+    (should (equal calls '(first)))
+    (packlet--register-after-load-handler
+     'emacs 'second (lambda () (push 'second calls)))
+    (should (equal calls '(second first)))
+    (packlet--register-after-load-handler
+     'emacs 'first (lambda () (push 'replacement calls)))
+    (should (equal calls '(replacement second first)))
+    (setq calls nil)
+    (packlet--run-after-load-handlers 'emacs)
+    (should (equal calls '(second replacement)))))
+
 (ert-deftest packlet-test-after-load-dispatcher-clears-when-last-handler-removed ()
   (let ((feature 'packlet-test-dispatcher-clear))
     (unwind-protect

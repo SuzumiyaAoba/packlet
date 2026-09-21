@@ -261,21 +261,23 @@ Return entries whose cleanup failed."
        (packlet--warn "Rollback for `%s' failed: %S" scope err)))))
 
 (defun packlet--register-source-entry (scope id install cleanup)
-  "Install and track a source-backed entry under ID for SCOPE."
+  "Install and track a source-backed entry under ID for SCOPE.
+Track partial installs too, so source-session rollback can clean them up."
   (let ((scope (packlet--normalize-source-scope
                 (or scope packlet--active-source-scope))))
-    (funcall install)
-    (when scope
-      (let ((entry (packlet--make-source-entry
-                    :id id :install install :cleanup cleanup)))
-        (if (equal scope packlet--active-source-scope)
-            (setq packlet--pending-source-entries
-                  (packlet--replace-source-entry packlet--pending-source-entries
-                                                entry))
-          (packlet--set-source-entries
-           scope
-           (packlet--replace-source-entry (packlet--source-entries scope)
-                                          entry)))))))
+    (unwind-protect
+        (funcall install)
+      (when scope
+        (let ((entry (packlet--make-source-entry
+                      :id id :install install :cleanup cleanup)))
+          (if (equal scope packlet--active-source-scope)
+              (setq packlet--pending-source-entries
+                    (packlet--replace-source-entry packlet--pending-source-entries
+                                                  entry))
+            (packlet--set-source-entries
+             scope
+             (packlet--replace-source-entry (packlet--source-entries scope)
+                                            entry))))))))
 
 (defun packlet--autoloads-file (file)
   "Return the autoload library name for FILE."
@@ -351,13 +353,15 @@ Return entries whose cleanup failed."
    (packlet--source-scope-file source-file)
    (list :after-load feature id)
    (lambda ()
+     ;; `eval-after-load' may run immediately.  Register the dispatcher
+     ;; before the new handler so only the explicit call below runs it.
+     (packlet--register-after-load-dispatcher feature)
      (let* ((entries (copy-sequence (packlet--after-load-handler-entries feature)))
             (cell (assoc id entries)))
        (if cell
            (setcdr cell function)
          (setq entries (append entries (list (cons id function)))))
        (puthash feature entries packlet--after-load-handlers))
-     (packlet--register-after-load-dispatcher feature)
      (when (featurep feature)
        (funcall function)))
    (lambda ()

@@ -76,6 +76,31 @@
       (packlet-test--cleanup-symbols symbols)
       (delete-directory directory t))))
 
+(ert-deftest packlet-test-guards-distinguish-nil-from-absence ()
+  (let ((runs 0)
+        (conditions 0))
+    (packlet packlet-test-unless-nil
+      :unless nil
+      :init (cl-incf runs))
+    (should (= runs 1))
+    (packlet packlet-test-when-nil-with-unless
+      :when nil
+      :unless (cl-incf conditions)
+      :init (cl-incf runs))
+    (should (= runs 1))
+    (should (= conditions 0))
+    (packlet packlet-test-when-t-unless-nil
+      :when t
+      :unless nil
+      :init (cl-incf runs))
+    (should (= runs 2))
+    (packlet packlet-test-runtime-guards
+      :when (progn (cl-incf conditions) t)
+      :unless (progn (cl-incf conditions) nil)
+      :init (cl-incf runs))
+    (should (= runs 3))
+    (should (= conditions 2))))
+
 (ert-deftest packlet-test-setq-keyword ()
   (let ((packlet-test-setq-a nil)
         (packlet-test-setq-b nil))
@@ -289,6 +314,33 @@
       (when (file-exists-p source-file)
         (delete-file source-file))
       (delete-directory directory t))))
+
+(ert-deftest packlet-test-mode-alist-cleanup-preserves-existing-entries ()
+  (let ((source-file (make-temp-file "packlet-test-mode-ownership-" nil ".el")))
+    (unwind-protect
+        (dolist (spec '((:mode auto-mode-alist)
+                        (:remap major-mode-remap-alist)
+                        (:interpreter interpreter-mode-alist)
+                        (:magic magic-mode-alist)
+                        (:magic-fallback magic-fallback-mode-alist)))
+          (pcase-let* ((`(,keyword ,variable) spec)
+                       (existing (cons (if (eq keyword :remap) 'old-mode "old")
+                                       'fundamental-mode))
+                       (added (cons (if (eq keyword :remap) 'new-mode "new")
+                                    'fundamental-mode))
+                       (later (cons (if (eq keyword :remap) 'later-mode "later")
+                                    'fundamental-mode))
+                       (code (format "(packlet packlet-test-mode-ownership %S %S %S)"
+                                     keyword existing added)))
+            (cl-progv (list variable) (list (list existing))
+              (dotimes (_ 2)
+                (packlet-test-eval-in-file source-file code)
+                (should (equal (symbol-value variable) (list added existing))))
+              (set variable (cons later (symbol-value variable)))
+              (packlet-test-eval-in-file source-file ";; removed")
+              (should (equal (symbol-value variable) (list later existing))))))
+      (packlet-cleanup-source source-file)
+      (delete-file source-file))))
 
 (ert-deftest packlet-test-remap-keyword ()
   (let* ((directory (make-temp-file "packlet-test-" t))

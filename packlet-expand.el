@@ -94,6 +94,32 @@ Let the compiler identify calls so quoted data in user forms stays intact."
           (packlet--unbind-variable ',had-value-var)
           (packlet--unbind-variable ',previous-value-var))))))))
 
+(defun packlet--expand-mode-entry (kind variable entry index feature site
+                                       source-scope file)
+  "Expand a mode alist ENTRY for KIND in VARIABLE at INDEX.
+FEATURE, SITE, SOURCE-SCOPE, and FILE identify the owning declaration."
+  (let ((added-var (packlet--generated-symbol
+                    "packlet--mode-entry-added" feature site
+                    (format "%s-%d" (substring (symbol-name kind) 1) index)))
+        (install `(add-to-list ',variable ',entry)))
+    `(progn
+       ,@(when (cdr entry)
+           `((packlet--maybe-autoload ',(cdr entry) ,file t)))
+       ,@(if (not packlet-expand-source-tracking)
+             (list install)
+           `((defvar ,added-var nil)
+             (packlet--register-source-entry
+              ',source-scope
+              ',(list site kind index)
+              (lambda ()
+                (setq ,added-var (not (member ',entry ,variable)))
+                ,install)
+              (lambda ()
+                (when ,added-var
+                  (setq ,variable
+                        (packlet--remove-list-entry ',entry ,variable)))
+                (packlet--unbind-variable ',added-var))))))))
+
 ;;;###autoload
 (defmacro packlet (feature &rest body)
   "Define lazy-first setup for FEATURE."
@@ -315,16 +341,9 @@ Let the compiler identify calls so quoted data in user forms stays intact."
           for remap in remaps
           for index from 0
           collect
-          `(progn
-             (packlet--maybe-autoload ',(cdr remap) ,file t)
-             (packlet--register-source-entry
-              ',source-scope
-              ',(list site :remap index)
-              (lambda ()
-                (add-to-list 'major-mode-remap-alist ',remap))
-              (lambda ()
-                (setq major-mode-remap-alist
-                      (delete ',remap major-mode-remap-alist))))))
+          (packlet--expand-mode-entry
+           :remap 'major-mode-remap-alist remap index feature site
+           source-scope file))
        ,@(cl-loop
           for entry in add-to-lists
           for index from 0
@@ -560,60 +579,28 @@ Let the compiler identify calls so quoted data in user forms stays intact."
           for mode in modes
           for index from 0
           collect
-          `(progn
-             (packlet--maybe-autoload ',(cdr mode) ,file t)
-             (packlet--register-source-entry
-              ',source-scope
-              ',(list site :mode index)
-              (lambda ()
-                (add-to-list 'auto-mode-alist ',mode))
-              (lambda ()
-                (setq auto-mode-alist
-                      (delete ',mode auto-mode-alist))))))
+          (packlet--expand-mode-entry
+           :mode 'auto-mode-alist mode index feature site source-scope file))
        ,@(cl-loop
           for interpreter in interpreters
           for index from 0
           collect
-          `(progn
-             (packlet--maybe-autoload ',(cdr interpreter) ,file t)
-             (packlet--register-source-entry
-              ',source-scope
-              ',(list site :interpreter index)
-              (lambda ()
-                (add-to-list 'interpreter-mode-alist ',interpreter))
-              (lambda ()
-                (setq interpreter-mode-alist
-                      (delete ',interpreter interpreter-mode-alist))))))
+          (packlet--expand-mode-entry
+           :interpreter 'interpreter-mode-alist interpreter index feature site
+           source-scope file))
        ,@(cl-loop
           for magic in magics
           for index from 0
           collect
-          `(progn
-             ,@(when (cdr magic)
-                 `((packlet--maybe-autoload ',(cdr magic) ,file t)))
-             (packlet--register-source-entry
-              ',source-scope
-              ',(list site :magic index)
-              (lambda ()
-                (add-to-list 'magic-mode-alist ',magic))
-              (lambda ()
-                (setq magic-mode-alist
-                      (delete ',magic magic-mode-alist))))))
+          (packlet--expand-mode-entry
+           :magic 'magic-mode-alist magic index feature site source-scope file))
        ,@(cl-loop
           for magic in magic-fallbacks
           for index from 0
           collect
-          `(progn
-             ,@(when (cdr magic)
-                 `((packlet--maybe-autoload ',(cdr magic) ,file t)))
-             (packlet--register-source-entry
-              ',source-scope
-              ',(list site :magic-fallback index)
-              (lambda ()
-                (add-to-list 'magic-fallback-mode-alist ',magic))
-              (lambda ()
-                (setq magic-fallback-mode-alist
-                      (delete ',magic magic-fallback-mode-alist))))))
+          (packlet--expand-mode-entry
+           :magic-fallback 'magic-fallback-mode-alist magic index feature site
+           source-scope file))
        ,@(cl-loop
           for hook in hooks
           for index from 0
@@ -621,6 +608,12 @@ Let the compiler identify calls so quoted data in user forms stays intact."
           (let* ((hook-var (plist-get hook :hook))
                  (kind (or (plist-get hook :kind) :hook))
                  (function (plist-get hook :function))
+                 (forward-args (memq kind '(:hook :hook-when :hook-if-feature)))
+                 (args (make-symbol (if forward-args "args" "_args")))
+                 (call-form
+                  (if forward-args
+                      `(apply ,(packlet--hook-function-form function) ,args)
+                    `(funcall ,(packlet--hook-function-form function))))
                  (autoload-function
                   (or (and (symbolp function) function)
                       (plist-get hook :autoload)))
@@ -669,19 +662,20 @@ Let the compiler identify calls so quoted data in user forms stays intact."
                          (cancel-timer ,timer-var)
                          (setq ,timer-var nil))
                        (defalias ',hook-function
-                         (lambda ()
+                         (lambda (&rest ,args)
                            (when (timerp ,timer-var)
                              (cancel-timer ,timer-var))
                            (setq ,run-buffer-var (current-buffer)
                                  ,timer-var
                                  (run-with-idle-timer
                                   ,delay nil
-                                  (lambda ()
+                                  (lambda (,args)
                                     (setq ,timer-var nil)
                                     (if (buffer-live-p ,run-buffer-var)
                                         (with-current-buffer ,run-buffer-var
-                                          (funcall ,(packlet--hook-function-form function)))
-                                      (funcall ,(packlet--hook-function-form function))))))))
+                                          ,call-form)
+                                      ,call-form))
+                                  ,args))))
                        ,(if local
                             `(when (buffer-live-p ,hook-buffer-var)
                                (with-current-buffer ,hook-buffer-var
@@ -713,8 +707,8 @@ Let the compiler identify calls so quoted data in user forms stays intact."
                      ,@(when local
                          `((setq ,hook-buffer-var (current-buffer))))
                      (defalias ',hook-function
-                       (lambda ()
-                         (funcall ,(packlet--hook-function-form function))))
+                       (lambda (&rest ,args)
+                         ,call-form))
                      ,(if local
                           `(when (buffer-live-p ,hook-buffer-var)
                              (with-current-buffer ,hook-buffer-var

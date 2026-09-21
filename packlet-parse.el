@@ -367,21 +367,26 @@ a cons cell of (POSITIONALS . OPTION-FORMS)."
             :depth (or depth (if append 90 0))
             :local (alist-get :local parsed))))
 
-  (defun packlet--normalize-hook-options (options &optional context)
+  (defun packlet--normalize-hook-options (options &optional context delay)
     "Normalize hook-like OPTIONS into a plist.
 CONTEXT defaults to \"hook\" and is used in validation errors.
-Delegates to `packlet--normalize-hook-like-options', stripping `:delay'."
+DELAY is an optional positional delay, mutually exclusive with `:delay'."
     (let ((result (packlet--normalize-hook-like-options
                    options
                    (or context "hook"))))
-      (cl-remf result :delay)
+      (when delay
+        (when (plist-member options :delay)
+          (error "packlet: specify either a positional delay or :delay for %s"
+                 (or context "hook")))
+        (setq result (plist-put result :delay delay)))
       result))
 
   (defun packlet--conditional-hook-function (condition function)
-    "Return a hook lambda that calls FUNCTION only when CONDITION is non-nil."
-    `(lambda ()
-       (when ,condition
-         (funcall ,(packlet--hook-function-form function)))))
+    "Return a hook lambda that forwards arguments when CONDITION is non-nil."
+    (let ((args (make-symbol "args")))
+      `(lambda (&rest ,args)
+         (when ,condition
+           (apply ,(packlet--hook-function-form function) ,args)))))
 
   (defun packlet--normalize-hook-add-options (options)
     "Normalize `:hook-add' OPTIONS into a plist."
@@ -420,9 +425,8 @@ Delegates to `packlet--normalize-hook-like-options', stripping `:delay'."
               (error "packlet: invalid entry %S for :hook" value)))
           (append
            (list :hook hook
-                 :function function
-                 :delay delay)
-           (packlet--normalize-hook-options options)))))
+                 :function function)
+           (packlet--normalize-hook-options options "hook" delay)))))
      (t
       (error "packlet: invalid entry %S for :hook" value))))
 
@@ -677,9 +681,8 @@ Each entry becomes a plist with :hook, :function, :delay, :depth, and :local."
          (list :kind :hook-when
                :hook hook
                :function (packlet--conditional-hook-function condition function)
-               :autoload (and (symbolp function) function)
-               :delay delay)
-         (packlet--normalize-hook-options options "hook-when")))))
+               :autoload (and (symbolp function) function))
+         (packlet--normalize-hook-options options "hook-when" delay)))))
 
   (defun packlet--normalize-hook-whens (forms)
     "Normalize FORMS under `:hook-when' into a flat list of hook entries."
@@ -1115,12 +1118,14 @@ an explicit `:compare' option."
   (defun packlet--guard-form (sections)
     "Return the combined guard form for `:when' and `:unless' in SECTIONS."
     (let ((when-form (packlet--keyword-form sections :when))
-          (unless-form (packlet--keyword-form sections :unless)))
+          (unless-form (packlet--keyword-form sections :unless))
+          (has-when (packlet--has-section-p sections :when))
+          (has-unless (packlet--has-section-p sections :unless)))
       (cond
-       ((and when-form unless-form)
+       ((and has-when has-unless)
         `(and ,when-form (not ,unless-form)))
-       (when-form when-form)
-       (unless-form `(not ,unless-form))
+       (has-when when-form)
+       (has-unless `(not ,unless-form))
        (t nil))))
 
   (defun packlet--normalize-loads (forms)
