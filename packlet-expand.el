@@ -127,7 +127,8 @@ FEATURE, SITE, SOURCE-SCOPE, and FILE identify the owning declaration."
   (unless (symbolp feature)
     (error "packlet: FEATURE must be a symbol"))
   (let* ((sections (packlet--parse-body body))
-         (site (packlet--expansion-site feature body))
+         (declaration-id (packlet--id-form sections))
+         (site (packlet--expansion-site feature body declaration-id))
          (source-file (and packlet-expand-source-tracking
                            (packlet--site-file site)))
          (source-scope (and source-file
@@ -150,6 +151,7 @@ FEATURE, SITE, SOURCE-SCOPE, and FILE identify the owning declaration."
                         (packlet--normalize-alists
                          (packlet--section sections :alist))))
          (config-forms (packlet--section sections :config))
+         (cleanup-forms (packlet--section sections :cleanup))
          (commands (packlet--normalize-symbols
                     (packlet--section sections :commands)
                     :commands))
@@ -213,9 +215,8 @@ FEATURE, SITE, SOURCE-SCOPE, and FILE identify the owning declaration."
                  (packlet--section sections :faces)))
          (advices (packlet--normalize-advices
                    (packlet--section sections :advice)))
-         (afters (packlet--normalize-symbols
-                  (packlet--section sections :after)
-                  :after))
+         (afters (packlet--normalize-afters
+                  (packlet--section sections :after)))
          (after-loads (packlet--normalize-after-loads
                        (packlet--section sections :after-load)))
          (idle-form (packlet--idle-form sections))
@@ -238,6 +239,8 @@ FEATURE, SITE, SOURCE-SCOPE, and FILE identify the owning declaration."
                            site
                            "config"))
          (user-forms (packlet--expand-user-keywords sections feature file afters)))
+    (when (and (packlet--has-section-p sections :cleanup) (not config-forms))
+      (error "packlet: :cleanup requires a non-empty :config"))
     (let ((expansion
            `(progn
               ,@(mapcar
@@ -253,8 +256,10 @@ FEATURE, SITE, SOURCE-SCOPE, and FILE identify the owning declaration."
         ',source-scope
         ',(list :site-feature site feature)
         (lambda ()
+          (packlet--check-declaration-id ',site)
           (puthash ',site
                    (list :feature ',feature
+                         :id ',declaration-id
                          :file ,file
                          :afters ',afters
                          :has-config ,(and config-forms t)
@@ -999,6 +1004,10 @@ FEATURE, SITE, SOURCE-SCOPE, and FILE identify the owning declaration."
                       (setq ,configured-var t)
                       ,@config-forms))))
               (lambda ()
+                ,@(when cleanup-forms
+                    `((when (and (boundp ',configured-var) ,configured-var)
+                        ,@cleanup-forms
+                        (setq ,configured-var nil))))
                 (packlet--unbind-variable ',configured-var)
                 (packlet--unbind-function ',config-function)))
              (packlet--register-after-load

@@ -108,13 +108,95 @@ Clone this repository and add it to `load-path`:
 - `packlet-cleanup-source` removes the registrations currently owned by a file
   or buffer scope.
 
+### Named declarations
+
+Use a literal `:id` (a non-nil symbol other than `t`, or a non-empty string) to
+identify a declaration independently of its position or body. IDs must be unique
+within their file or non-file buffer; different sources can use the same ID.
+
+```elisp
+(packlet org
+  :id org-editing
+  :hook-enable (org-mode-hook visual-line-mode))
+```
+
+- `M-x packlet-eval-declaration` evaluates the top-level named declaration at
+  point, replacing only that declaration's registrations. On failure, its old
+  registrations are restored; other declarations are left in place.
+- Direct `eval` of a top-level `packlet` form with `:id` also replaces just that
+  declaration. Anonymous or enclosing forms retain the existing source-wide
+  evaluation behavior. Use the explicit command when editing one declaration.
+- `M-x packlet-cleanup-declaration` removes a named declaration from the current
+  source. Lisp callers can use `(packlet-cleanup-declaration 'org-editing source)`;
+  `source` accepts the same arguments as `packlet-cleanup-source`.
+- Whole-file `eval-buffer` and `load-file` still replace the entire source,
+  including declarations that were removed from the file.
+- Renaming an ID creates a different declaration. Clean up the old ID explicitly
+  or reevaluate the whole source. IDs appear in the source inspection commands
+  and in `packlet-explain-feature`.
+
+### Explicit configuration cleanup
+
+Use `:cleanup` to undo effects of custom `:config` code that packlet cannot infer:
+
+```elisp
+(packlet foo
+  :id foo-session
+  :config
+  (my-foo-start)
+  :cleanup
+  (my-foo-stop))
+```
+
+`:cleanup` requires a non-empty `:config`. It becomes active when `:config`
+**starts**, so it also handles partially failed configuration. It does not run
+for a false guard or a configuration still waiting for its dependencies. Cleanup
+runs on removal, replacement, buffer cleanup, or rollback, before earlier
+registrations in that declaration are undone. Successful cleanup is not repeated;
+failed cleanup is reported and retained for retry by the cleanup commands.
+
+Cleanup code should tolerate partially initialized state and repeated attempts.
+Rollback may run the old `:config` again to restore its registrations. Arbitrary
+`:init`/`:load` side effects and external resources are not automatically
+transactional; `:cleanup` is an explicit aid, not a guarantee of complete undo.
+
+## Diagnostics
+
+`M-x packlet-check` checks the current buffer without evaluating its code or
+loading the packages being checked. Lisp callers can pass a buffer or file name:
+
+```elisp
+(packlet-check "~/.emacs.d/init.el")
+```
+
+It reports:
+
+- unknown keywords, with spelling suggestions, and invalid built-in arguments
+- duplicate IDs and potential duplicate bindings (including delayed bindings)
+- libraries not found on the current `load-path`, with `:file`/activation hints
+- potentially blocked `:demand` dependency cycles, accounting for OR alternatives
+
+The return value is a list of diagnostic plists with `:severity`, `:code`,
+`:message`, `:line`, `:feature`, and `:id`. Literal declarations nested in forms
+such as `progn` are checked using the enclosing top-level form's line number.
+Quoted data and function-quoted templates are skipped. The checker does not
+expand macros, invoke user keyword callbacks, or evaluate conditions; custom
+keyword payloads and generated declarations cannot be fully validated. Library,
+binding, and dependency warnings are advisory: guards may be mutually exclusive,
+features may live in differently named libraries, and external code may load them.
+
+Unknown bare keywords are also rejected during normal macro expansion. Quote a
+literal keyword value used as a top-level section form, for example
+`:init ':some-value`, so it is not mistaken for a section name.
+
 ## Compiled configurations
 
 For immutable, generated configurations, bind `packlet-expand-source-tracking`
 to `nil` while byte-compiling. This emits direct settings and omits source
 metadata, cleanup closures, and registration calls. The default remains `t` for
 interactive editing; code compiled with tracking disabled cannot be rolled back
-or removed with the source cleanup commands.
+or removed with the source cleanup commands. This also disables `:cleanup` and
+named-declaration inspection/cleanup for the compiled configuration.
 
 ```elisp
 (require 'packlet)
@@ -135,6 +217,9 @@ autoloaded or declare their file explicitly with `:autoload`.
 
 ## Keywords
 
+- `:id`
+  A literal name unique within the source, used for declaration-level
+  reevaluation and cleanup. See [Named declarations](#named-declarations).
 - `:file`
   Override the library name used for autoloads, declarations, and demand
   loading. By default this is the same as the feature symbol.
@@ -164,8 +249,11 @@ autoloaded or declare their file explicitly with `:autoload`.
   the entry key (`car`) as the default equality check.  This is useful for
   alists such as `display-buffer-alist`.
 - `:config`
-  Forms evaluated once after the feature and every `:after` dependency are
-  loaded.
+  Forms evaluated once after the feature is loaded and the `:after` expressions
+  are satisfied.
+- `:cleanup`
+  Forms that undo custom `:config` effects after that configuration has started.
+  See [Explicit configuration cleanup](#explicit-configuration-cleanup).
 - `:commands`
   Symbols to autoload. `packlet` prefers package autoload definitions when
   available and otherwise falls back to the package file.
@@ -263,13 +351,13 @@ autoloaded or declare their file explicitly with `:autoload`.
   This is useful together with `:bind-keymap` and `:bind (:map ...)` when a
   package uses a config-owned prefix map.
 - `:enable`
-  Symbols naming mode-like functions to call after the feature and every
-  `:after` dependency are loaded.  A bare symbol calls the function with `1`.
+  Symbols naming mode-like functions to call after the feature is loaded and
+  the `:after` expressions are satisfied.  A bare symbol calls the function with `1`.
   A tuple `(function arg)` calls it with `arg`, for example
   `(treemacs-git-mode 'deferred)`.
 - `:faces`
-  `(face :attribute value ...)` entries applied after the feature and every
-  `:after` dependency are loaded.  `:copy` copies another face before applying
+  `(face :attribute value ...)` entries applied after the feature is loaded and
+  the `:after` expressions are satisfied.  `:copy` copies another face before applying
   explicit attributes, for example
   `(anzu-mode-line :copy mode-line)` or
   `(git-gutter:modified :background "purple")`.
@@ -278,8 +366,13 @@ autoloaded or declare their file explicitly with `:autoload`.
   List-style entries additionally accept `:name` and `:depth`, for example
   `(projectile-find-file :override consult-projectile-find-file :depth -10)`.
 - `:after`
-  Feature symbols that must be loaded before `:config` or `:demand` becomes
-  active.
+  Dependency expressions that must be satisfied before `:config`, `:demand`,
+  `:idle`, `:enable`, or `:faces` becomes active. Bare symbols and legacy lists
+  remain AND conditions: `:after (a b)` requires both. `:after (:or a b)` accepts
+  either feature, and `:after (:and a (:or b c))` requires `a` and either `b` or
+  `c`. Groups must be non-empty. Multiple top-level expressions are combined
+  with AND. These expressions test loaded features; they do not load dependencies.
+  Keymap bindings watch all mentioned features for map availability, as before.
 - `:after-load`
   `(feature body...)` forms evaluated after an arbitrary feature loads, even if
   it is not the package feature being configured. If the feature is already

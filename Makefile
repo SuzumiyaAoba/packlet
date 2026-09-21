@@ -12,14 +12,18 @@ TEST_FILES = \
 	test/packlet-test-keywords.el \
 	test/packlet-test-hooks.el \
 	test/packlet-test-static.el \
+	test/packlet-test-after.el \
+	test/packlet-test-declarations.el \
+	test/packlet-test-check.el \
 	test/packlet-test.el
 
 compile:
 	$(EMACS) -Q --batch -L . -L test -f batch-byte-compile \
 		packlet-runtime.el \
-		packlet-source.el \
 		packlet-parse.el \
+		packlet-source.el \
 		packlet-expand.el \
+		packlet-check.el \
 		packlet.el \
 		$(TEST_FILES)
 

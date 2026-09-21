@@ -16,6 +16,9 @@
 (require 'packlet-test-keywords)
 (require 'packlet-test-hooks)
 (require 'packlet-test-static)
+(require 'packlet-test-after)
+(require 'packlet-test-declarations)
+(require 'packlet-test-check)
 
 (provide 'packlet-test)
 

@@ -15,7 +15,8 @@
   (require 'macroexp)
 
   (defconst packlet--keywords
-    '(:file :when :unless :init :setq :custom :load :add-to-list :list :alist :config
+    '(:id :file :when :unless :init :setq :custom :load :add-to-list :list :alist
+          :config :cleanup
             :commands :autoload :mode :remap :derived-mode
             :hook :hook-setq :hook-call :hook-add :hook-enable :hook-disable
             :hook-when :hook-if-feature
@@ -91,12 +92,26 @@ Each PLIST may contain:
                packlet--expansion-load-states)
       counter))
 
-  (defun packlet--expansion-site (feature body)
-    "Return a stable site identifier for FEATURE with BODY."
+  (defun packlet--id-form (sections)
+    "Return the literal declaration identifier from SECTIONS, if present."
+    (when (assq :id sections)
+      (let ((id (packlet--keyword-form sections :id)))
+        (unless (or (and (symbolp id) id (not (keywordp id)) (not (eq id t)))
+                    (and (stringp id) (not (string-empty-p id))))
+          (error "packlet: :id must be a non-nil symbol or non-empty string"))
+        id)))
+
+  (defun packlet--expansion-site (feature body &optional id)
+    "Return a stable site identifier for FEATURE with BODY and optional ID."
     (let* ((file (or (macroexp-file-name)
                      buffer-file-name))
            (expanded-file (and file (expand-file-name file))))
-      (or (and expanded-file
+      (or (and id
+               (packlet--named-site
+                (or (packlet--source-scope-file expanded-file)
+                    (packlet--current-eval-scope))
+                id))
+          (and expanded-file
                (list 'load expanded-file
                      (packlet--next-load-expansion-index expanded-file)))
           (list 'eval
@@ -106,8 +121,9 @@ Each PLIST may contain:
 
   (defun packlet--site-file (site)
     "Return SITE's source file, or nil for non-file-backed sites."
-    (and (eq (car-safe site) 'load)
-         (cadr site)))
+    (pcase site
+      (`(load ,file ,_) file)
+      (`(named (:file ,file) ,_) file)))
 
   (defun packlet--generated-symbol (prefix feature site &optional suffix)
     "Return an interned helper symbol for PREFIX, FEATURE, SITE, and SUFFIX."
@@ -136,8 +152,10 @@ Each PLIST may contain:
     "Parse packlet BODY into an alist keyed by DSL keyword."
     (let (sections current)
       (dolist (form body)
-        (if (packlet--keyword-p form)
+        (if (keywordp form)
             (progn
+              (unless (packlet--keyword-p form)
+                (error "packlet: unknown keyword %S" form))
               (setq current form)
               (unless (assq current sections)
                 (push (cons current nil) sections)))
@@ -172,6 +190,31 @@ Each PLIST may contain:
          (t
           (error "packlet: invalid value %S for %S" form keyword))))
       (nreverse result)))
+
+  (defun packlet--normalize-after-expression (form)
+    "Normalize a non-empty dependency expression FORM."
+    (cond
+     ((and (symbolp form) form (not (keywordp form))) form)
+     ((and (consp form) (packlet--proper-list-p form))
+      (let* ((operator (if (keywordp (car form)) (car form) :and))
+             (operands (if (keywordp (car form)) (cdr form) form)))
+        (unless (and (memq operator '(:and :or)) operands)
+          (error "packlet: invalid :after expression %S" form))
+        (cons operator (mapcar #'packlet--normalize-after-expression operands))))
+     (t (error "packlet: invalid :after dependency %S" form))))
+
+  (defun packlet--normalize-afters (forms)
+    "Normalize :after FORMS, preserving legacy lists as implicit ANDs."
+    (let (result)
+      (dolist (form forms)
+        (when form
+          (let ((expression (packlet--normalize-after-expression form)))
+            (setq result
+                  (append result
+                          (if (and (consp expression) (eq (car expression) :and))
+                              (cdr expression)
+                            (list expression)))))))
+      result))
 
   (defun packlet--file-form (sections feature)
     "Return the library name from SECTIONS for FEATURE."

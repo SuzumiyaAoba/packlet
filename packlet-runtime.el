@@ -38,9 +38,38 @@ sub-library command is declared explicitly with `:autoload'."
    (t
     (error "packlet: :idle must evaluate to t, nil, or a non-negative number"))))
 
-(defun packlet--all-features-loaded-p (features)
-  "Return non-nil when every feature in FEATURES is loaded."
-  (cl-every #'featurep features))
+(defun packlet--dependency-satisfied-p (expression &optional predicate)
+  "Test dependency EXPRESSION using PREDICATE, defaulting to `featurep'."
+  (let ((predicate (or predicate #'featurep)))
+    (if (symbolp expression)
+        (funcall predicate expression)
+      (funcall (if (eq (car expression) :or) #'cl-some #'cl-every)
+               (lambda (child)
+                 (packlet--dependency-satisfied-p child predicate))
+               (cdr expression)))))
+
+(defun packlet--all-features-loaded-p (afters)
+  "Return non-nil when every dependency expression in AFTERS is satisfied."
+  (cl-every #'packlet--dependency-satisfied-p afters))
+
+(defun packlet--after-features (afters)
+  "Return the distinct feature symbols mentioned in AFTERS."
+  (delete-dups
+   (cl-mapcan (lambda (expression)
+                (if (symbolp expression)
+                    (list expression)
+                  (packlet--after-features (cdr expression))))
+              afters)))
+
+(defun packlet--missing-afters (afters)
+  "Return unloaded features from unsatisfied expressions in AFTERS."
+  (delete-dups
+   (cl-mapcan (lambda (expression)
+                (unless (packlet--dependency-satisfied-p expression)
+                  (if (symbolp expression)
+                      (list expression)
+                    (packlet--missing-afters (cdr expression)))))
+              afters)))
 
 (defun packlet--current-autoload-file (function)
   "Return FUNCTION's current autoload file, or nil when unavailable."
@@ -120,6 +149,13 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
 (defvar packlet--pending-source-entries nil
   "Entries registered during the active `packlet' evaluation session.")
 
+(defvar packlet--buffer-site-counter 0
+  "Counter used to distinguish non-file declaration sources.")
+
+(defvar-local packlet--buffer-site-key nil
+  "Stable identity for named declarations in this non-file buffer.")
+(put 'packlet--buffer-site-key 'permanent-local t)
+
 (defun packlet--warn (format-string &rest args)
   "Emit a `packlet' warning using FORMAT-STRING and ARGS."
   (when packlet-warn-on-missing-libraries
@@ -135,6 +171,30 @@ Each value is a list of (ID . FUNCTION) entries in registration order.")
     (`(:buffer ,buffer)
      (list :buffer buffer))
     (_ scope)))
+
+(defun packlet--named-site (scope id)
+  "Return the stable declaration site for ID in SCOPE."
+  (list 'named
+        (pcase (packlet--normalize-source-scope scope)
+          (`(:buffer ,buffer)
+           (with-current-buffer buffer
+             (unless packlet--buffer-site-key
+               (setq packlet--buffer-site-key
+                     (format "%s#%d" (buffer-name) (cl-incf packlet--buffer-site-counter))))
+             (list :buffer packlet--buffer-site-key)))
+          (other other))
+        id))
+
+(defun packlet--check-declaration-id (site)
+  "Reject duplicate named SITE registrations in the current source session."
+  (when (and (eq (car-safe site) 'named)
+             (cl-some
+              (lambda (entry)
+                (let ((id (packlet--source-entry-id entry)))
+                  (and (eq (car-safe id) :site-feature)
+                       (equal (cadr id) site))))
+              packlet--pending-source-entries))
+    (error "packlet: duplicate :id %S in this source" (nth 2 site))))
 
 (defun packlet--source-scope-file (file)
   "Return the source scope for FILE."
@@ -373,7 +433,7 @@ Track partial installs too, so source-session rollback can clean them up."
 ID identifies the current `packlet' expansion."
   (packlet--register-after-load-handler
    feature (list id feature) function source-file)
-  (dolist (after afters)
+  (dolist (after (packlet--after-features afters))
     (packlet--register-after-load-handler
      after (list id after) function source-file))
   (funcall function))
@@ -387,7 +447,7 @@ ID identifies the current `packlet' expansion."
            (when (and (not (featurep feature))
                       (packlet--all-features-loaded-p afters))
              (packlet--load-feature feature file)))))
-    (dolist (after afters)
+    (dolist (after (packlet--after-features afters))
       (packlet--register-after-load-handler
        after (list id after) load-now source-file))
     (funcall load-now)))
@@ -465,7 +525,7 @@ ID identifies the current `packlet' expansion."
                     (packlet--maybe-schedule-idle-load id)))))
            (setf (packlet--idle-state-startup-hook state) startup-hook)
            (add-hook 'emacs-startup-hook startup-hook)))
-       (dolist (after afters)
+       (dolist (after (packlet--after-features afters))
          (packlet--register-after-load-handler
           after
           (list id after)
@@ -517,7 +577,7 @@ watched feature load event fires."
                   (define-key map key command)))))
          (packlet--register-after-load-handler
           feature (list id feature) install source-file)
-         (dolist (after afters)
+         (dolist (after (packlet--after-features afters))
            (packlet--register-after-load-handler
             after (list id after) install source-file))
          (unless skip-initial-install

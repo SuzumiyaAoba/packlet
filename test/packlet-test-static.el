@@ -100,9 +100,10 @@
 (defvar packlet-test-runtime-hook-ran nil)
 (defvar packlet-test-runtime-data nil)
 (packlet packlet-test-runtime-package
+  :id runtime-package
   :init (setq packlet-test-runtime-data
               `(packlet--register-source-entry nil ,(+ 1 2) install cleanup))
-  :after packlet-test-runtime-dependency
+  :after (:or packlet-test-runtime-dependency packlet-test-runtime-unused)
   :commands packlet-test-runtime-command
   :hook (packlet-test-runtime-hook-hook . packlet-test-runtime-hook)
   :bind (:map packlet-test-runtime-map (\"a\" . packlet-test-runtime-command))
@@ -127,7 +128,7 @@
 (cl-assert (= packlet-test-runtime-config-runs 1))
 (maphash (lambda (id _state) (packlet--run-idle-load id)) packlet--idle-load-states)
 (cl-assert (featurep 'packlet-test-runtime-idle))
-(dolist (feature '(packlet packlet-source packlet-parse packlet-expand))
+(dolist (feature '(packlet packlet-source packlet-parse packlet-expand packlet-check))
   (cl-assert (not (featurep feature))))")
           (dolist (tracking '(t nil))
             (let ((packlet-expand-source-tracking tracking)

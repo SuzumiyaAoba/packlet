@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'packlet-runtime)
+(require 'packlet-parse)
 
 (defun packlet--resolve-source-scope (source)
   "Normalize SOURCE into a registered `packlet' source scope."
@@ -69,6 +70,7 @@
   (pcase value
     (`(load ,_ ,_) t)
     (`(eval ,_ ,_ ,_) t)
+    (`(named ,_ ,_) t)
     (_ nil)))
 
 (defun packlet--find-entry-site (value)
@@ -271,7 +273,7 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
 
 (defun packlet--site-missing-afters (metadata)
   "Return unmet `:after' dependencies from METADATA."
-  (cl-remove-if #'featurep (copy-sequence (plist-get metadata :afters))))
+  (packlet--missing-afters (plist-get metadata :afters)))
 
 (defun packlet--idle-status (feature site metadata _entries)
   "Return the idle-load status for FEATURE at SITE from METADATA."
@@ -361,10 +363,16 @@ SOURCE may be nil, a file name, a buffer, or a normalized source scope."
                  nil
                  (list
                   (packlet--source-scope-name scope)
+                  (when (plist-get metadata :id)
+                    (format "Declaration: %S" (plist-get metadata :id)))
                   (format "Entries: %d" (length entries))
                   (format "Afters: %s"
                           (if-let ((afters (plist-get metadata :afters)))
-                              (mapconcat #'symbol-name afters ", ")
+                              (mapconcat (lambda (expression)
+                                           (if (symbolp expression)
+                                               (symbol-name expression)
+                                             (prin1-to-string expression)))
+                                         afters ", ")
                             "none"))
                   (format "Missing afters: %s"
                           (if missing-afters
@@ -433,6 +441,66 @@ Return entries whose cleanup failed."
                  "")))
     failed))
 
+(defun packlet--replace-site-entries (entries site replacements)
+  "Replace SITE's entries in ENTRIES with REPLACEMENTS, preserving other sites."
+  (let (result inserted)
+    (dolist (entry entries)
+      (if (equal (packlet--find-entry-site (packlet--source-entry-id entry)) site)
+          (unless inserted
+            (setq result (append result replacements)
+                  inserted t))
+        (setq result (append result (list entry)))))
+    (if inserted result (append result replacements))))
+
+(defun packlet--read-declaration-id ()
+  "Read a registered declaration ID from the current source."
+  (let (choices)
+    (dolist (entry (packlet--source-entries (packlet--buffer-source-scope)))
+      (let ((site (packlet--find-entry-site (packlet--source-entry-id entry))))
+        (when (eq (car-safe site) 'named)
+          (cl-pushnew (cons (prin1-to-string (nth 2 site)) (nth 2 site))
+                      choices :test #'equal))))
+    (unless choices
+      (user-error "No named packlet declarations in this source"))
+    (cdr (assoc (completing-read "Declaration: " choices nil t) choices))))
+
+;;;###autoload
+(defun packlet-cleanup-declaration (id &optional source)
+  "Clean up declaration ID in SOURCE, leaving other declarations untouched.
+SOURCE has the same meaning as in `packlet-cleanup-source'.
+Return entries whose cleanup failed, retaining them for a later retry."
+  (interactive (list (packlet--read-declaration-id)))
+  (let* ((scope (packlet--resolve-source-scope source))
+         (site (packlet--named-site scope id))
+         (entries (packlet--source-entries scope))
+         (selected (packlet--site-entries site entries))
+         (failed (packlet--run-source-entry-cleanups selected scope)))
+    (packlet--set-source-entries
+     scope (packlet--replace-site-entries entries site failed))
+    failed))
+
+;;;###autoload
+(defun packlet-eval-declaration (&optional form lexical)
+  "Evaluate named packlet FORM transactionally without replacing other sites.
+Interactively, or when FORM is nil, read the top-level declaration at point.
+FORM must have an explicit :id.  LEXICAL is passed to `eval'; interactive
+calls use the current buffer's `lexical-binding'."
+  (interactive (list nil lexical-binding))
+  (unless form
+    (setq form (save-excursion
+                 (unless (looking-at-p "(packlet\\_>")
+                   (beginning-of-defun))
+                 (read (current-buffer)))))
+  (unless (and (packlet--proper-list-p form) (eq (car-safe form) 'packlet))
+    (user-error "Expected a top-level packlet declaration"))
+  (let* ((id (packlet--id-form (packlet--parse-body (cddr form))))
+         (scope (packlet--buffer-source-scope)))
+    (unless id
+      (user-error "Declaration-level evaluation requires :id"))
+    (packlet--with-source-session
+     scope nil (lambda () (eval form lexical))
+     (packlet--named-site scope id))))
+
 (defun packlet--form-contains-packlet-p (form &optional seen)
   "Return non-nil when FORM appears to contain a `packlet' call."
   (let ((seen (or seen (make-hash-table :test #'eq))))
@@ -463,43 +531,46 @@ Return entries whose cleanup failed."
         found))
      (t nil))))
 
-(defun packlet--with-source-session (scope expansion-file thunk)
+(defun packlet--with-source-session (scope expansion-file thunk &optional site)
   "Evaluate THUNK transactionally for SOURCE SCOPE.
-When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
+When EXPANSION-FILE is non-nil, reset its expansion counter for the session.
+When SITE is non-nil, replace only that declaration's entries."
   (let ((scope (packlet--normalize-source-scope scope)))
-    (if (or (null scope)
-            packlet--active-source-scope)
+    (if (or (null scope) packlet--active-source-scope)
         (funcall thunk)
-      (let* ((old-entries (packlet--source-entries scope))
+      (let* ((all-entries (packlet--source-entries scope))
+             (old-entries (if site (packlet--site-entries site all-entries)
+                            all-entries))
              (old-expansion-state
               (and expansion-file
                    (gethash expansion-file packlet--expansion-load-states)))
              (old-cleanup-failures
-              (packlet--cleanup-source-scope scope t)))
+              (packlet--run-source-entry-cleanups old-entries scope))
+             (store (lambda (entries)
+                      (packlet--set-source-entries
+                       scope (if site
+                                 (packlet--replace-site-entries all-entries site entries)
+                               entries)))))
+        (funcall store old-cleanup-failures)
         (when expansion-file
           (remhash expansion-file packlet--expansion-load-states))
         (let ((packlet--active-source-scope scope)
               (packlet--pending-source-entries nil))
           (condition-case err
               (let ((result (funcall thunk)))
-                (packlet--set-source-entries
-                 scope
-                 (packlet--merge-source-entry-lists
-                  old-cleanup-failures
-                  packlet--pending-source-entries))
+                (funcall store
+                         (packlet--merge-source-entry-lists
+                          old-cleanup-failures packlet--pending-source-entries))
                 result)
             (error
-             (packlet--run-source-entry-cleanups
-              packlet--pending-source-entries
-              scope)
-             (packlet--run-source-entry-installs old-entries scope)
-             (packlet--set-source-entries
-              scope
-              (append old-entries old-cleanup-failures))
+             (let ((failed (packlet--run-source-entry-cleanups
+                            packlet--pending-source-entries scope)))
+               (setq packlet--pending-source-entries nil)
+               (packlet--run-source-entry-installs old-entries scope)
+               (funcall store (packlet--merge-source-entry-lists old-entries failed)))
              (when expansion-file
                (if old-expansion-state
-                   (puthash expansion-file
-                            old-expansion-state
+                   (puthash expansion-file old-expansion-state
                             packlet--expansion-load-states)
                  (remhash expansion-file packlet--expansion-load-states)))
              (signal (car err) (cdr err)))))))))
@@ -545,11 +616,13 @@ When EXPANSION-FILE is non-nil, reset its expansion counter for the session."
                      (packlet--form-contains-packlet-p form)
                    (eq (car-safe form) 'packlet))))
         (funcall orig form lexical)
-      (packlet--with-source-session
-       (packlet--current-eval-scope)
-       nil
-       (lambda ()
-         (funcall orig form lexical))))))
+      (let* ((id (and (eq (car-safe form) 'packlet)
+                      (packlet--id-form (packlet--parse-body (cddr form)))))
+             (scope (if id (packlet--buffer-source-scope)
+                      (packlet--current-eval-scope))))
+        (packlet--with-source-session
+         scope nil (lambda () (funcall orig form lexical))
+         (and id (packlet--named-site scope id)))))))
 
 (defun packlet--kill-buffer-hook ()
   "Clean up `packlet' registrations owned by the current buffer."

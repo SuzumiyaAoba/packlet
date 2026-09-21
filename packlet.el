@@ -29,6 +29,7 @@
 (require 'packlet-source)
 (require 'packlet-parse)
 (require 'packlet-expand)
+(require 'packlet-check)
 
 (provide 'packlet)
 
